@@ -1828,7 +1828,9 @@ class ConversationService:
         # The Application settings' Git identity lives in the frontend-owned
         # misc_settings; without this the agent's commits never use it
         # (OpenHands/OpenHands#17899). Local workspaces only: a remote
-        # workspace is configured on the deployment that owns it.
+        # workspace is configured on the deployment that owns it. For a
+        # worktree conversation the repo-local write lands in the shared
+        # parent .git/config (see git_identity's docstring).
         if isinstance(workspace, LocalWorkspace):
             await asyncio.to_thread(
                 apply_git_identity,

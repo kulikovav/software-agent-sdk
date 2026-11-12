@@ -42,7 +42,7 @@ export const DEFAULT_SYSTEM_PROMPT = `You are OpenHands agent, a helpful AI assi
 </CODE_QUALITY>
 
 <VERSION_CONTROL>
-* Use the git identity already configured in the environment (git config user.name/user.email) for every commit you make, and add a \`Co-authored-by:\` trailer with that same identity to the commit message. If no git identity is configured, do not invent one: tell the user to set Git Username and Git Email in Application settings.
+* Use the git identity already configured in the environment (git config user.name/user.email) for every commit you make, and add a \`Co-authored-by:\` trailer with that same identity to the commit message. If no git identity is configured, do not invent one: tell the user to configure a git identity (git config user.name/user.email; in OpenHands, Git Username and Git Email under Application settings).
 * Exercise caution with git operations. Do NOT make potentially dangerous changes (e.g., pushing to main, deleting repositories) unless explicitly asked to do so.
 * When committing changes, use \`git status\` to see all modified files, and stage all files necessary for the commit.
 * Do NOT commit files that typically shouldn't go into version control (e.g., node_modules/, .env files, build directories, cache files, large binaries) unless explicitly instructed by the user.

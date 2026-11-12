@@ -5,9 +5,11 @@ resolves one thing — **effective consent** — and delivery additionally requi
 that an exporter is configured.
 
 Consent lives in ``misc_settings.telemetry.consent``. That container is
-otherwise opaque to the agent-server, and this namespace is the single
-sanctioned exception: the frontend owns the value, the agent-server only reads
-it, and the shape is documented here rather than inferred.
+otherwise opaque to the agent-server. Read namespaces are each documented
+where they are read: this one, and the Application-settings git identity in
+``openhands.agent_server.git_identity``. The frontend owns the values, the
+agent-server only reads them, and the shape is documented where it is read
+rather than inferred.
 
 A hosted deployment enforces its policy by *seeding* those misc settings before
 any conversation starts (``consent = granted``, ``managed = true``), not by the
