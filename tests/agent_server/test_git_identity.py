@@ -1,13 +1,14 @@
-"""The Application-settings git identity reaches the workspace (#17899).
+"""The Application-settings git identity reaches the workspace.
 
 Canvas saves Git Username / Git Email under ``misc_settings.app_preferences``.
 The conversation start must apply that identity to the workspace:
 
-- repo-local ``user.name``/``user.email`` in the workspace repository, so the
-  settings are authoritative for the project the agent commits into;
-- the runtime's global identity filled from the settings only when it is unset,
-  so ``git init``ed sub-repositories work on a host without a ``~/.gitconfig``
-  and an existing host identity is never clobbered.
+- a repository without an identity gets repo-local ``user.name``/``user.email``
+  from the settings, so the settings fill the workspace the agent commits into;
+- the runtime's global identity is filled from the settings only when nothing
+  resolves in any git scope, so ``git init``ed sub-repositories work on a host
+  without a ``~/.gitconfig`` and an existing host identity is never clobbered;
+- any failure while doing so must not block the conversation from starting.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from openhands.agent_server import git_identity
 from openhands.agent_server.git_identity import apply_git_identity
 from openhands.agent_server.models import StartConversationRequest
 from openhands.agent_server.persistence import PersistedSettings
@@ -57,11 +59,14 @@ def _settings_identity(
 
 
 @pytest.fixture(autouse=True)
-def isolated_global_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point git's global scope at a test file, never at the real ~/.gitconfig."""
+def isolated_global_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point git's global and system scopes at test files, never at real ones."""
     config_file = tmp_path / "gitconfig"
+    config_file.touch()
+    system_file = tmp_path / "system-gitconfig"
+    system_file.touch()
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config_file))
-    return config_file
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(system_file))
 
 
 def test_workspace_repo_receives_settings_identity(tmp_path: Path) -> None:
@@ -80,6 +85,17 @@ def test_global_identity_filled_when_unset(tmp_path: Path) -> None:
     assert _git("config", "--global", "user.email") == "qa-tester@example.com"
 
 
+def test_repo_with_own_identity_is_kept(tmp_path: Path) -> None:
+    repo_dir = _repo(tmp_path)
+    _git("config", "--local", "user.name", "Repo Person", cwd=repo_dir)
+    _git("config", "--local", "user.email", "repo@example.com", cwd=repo_dir)
+
+    apply_git_identity(repo_dir, _settings_identity().misc_settings)
+
+    assert _git("config", "user.name", cwd=repo_dir) == "Repo Person"
+    assert _git("config", "user.email", cwd=repo_dir) == "repo@example.com"
+
+
 def test_existing_global_identity_is_kept(tmp_path: Path) -> None:
     _git("config", "--global", "user.name", "Host User")
     _git("config", "--global", "user.email", "host@example.com")
@@ -87,9 +103,17 @@ def test_existing_global_identity_is_kept(tmp_path: Path) -> None:
 
     apply_git_identity(repo_dir, _settings_identity().misc_settings)
 
-    # The workspace still follows the settings, but the host identity survives.
+    # The workspace still gets the settings, but the host identity survives.
     assert _git("config", "user.name", cwd=repo_dir) == "QA Tester"
     assert _git("config", "--global", "user.name") == "Host User"
+
+
+def test_system_identity_is_not_shadowed(tmp_path: Path) -> None:
+    _git("config", "--system", "user.name", "System User")
+
+    apply_git_identity(tmp_path, _settings_identity().misc_settings)
+
+    assert _git_or_empty("config", "--global", "user.name") == ""
 
 
 def test_empty_settings_leave_git_untouched(tmp_path: Path) -> None:
@@ -114,9 +138,31 @@ def test_workspace_without_git_repo_still_fills_global(tmp_path: Path) -> None:
     assert _git("config", "--global", "user.name") == "QA Tester"
 
 
-async def test_start_conversation_applies_settings_identity(
-    tmp_path: Path, isolated_global_config: Path
+def test_nonexistent_workspace_still_fills_global(tmp_path: Path) -> None:
+    apply_git_identity(tmp_path / "gone", _settings_identity().misc_settings)
+
+    assert _git("config", "--global", "user.name") == "QA Tester"
+
+
+def test_workspace_path_is_a_file_does_not_crash(tmp_path: Path) -> None:
+    plain_file = tmp_path / "workspace"
+    plain_file.write_text("not a directory\n")
+
+    apply_git_identity(plain_file, _settings_identity().misc_settings)
+
+
+def test_git_failure_does_not_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    def broken_run_git_command(*args: Any, **kwargs: Any) -> str:
+        raise OSError("git subprocess cannot run")
+
+    monkeypatch.setattr(git_identity, "run_git_command", broken_run_git_command)
+
+    apply_git_identity(_repo(tmp_path), _settings_identity().misc_settings)
+
+
+async def test_start_conversation_applies_settings_identity(tmp_path: Path) -> None:
     repo_dir = _repo(tmp_path)
     request = StartConversationRequest(
         agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
