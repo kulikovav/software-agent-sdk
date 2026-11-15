@@ -53,7 +53,31 @@ def test_automation_conversation_tags_from_metadata(monkeypatch):
         "automationid": "auto-1",
         "automationname": "Trace me",
         "automationrunid": "run-1",
+        "bridgemode": "cloudagent",
+        "bridgearchived": "false",
     }
+
+
+def test_automation_conversation_tags_map_repository_metadata(monkeypatch):
+    monkeypatch.setenv(
+        "OPENHANDS_OBSERVABILITY_METADATA",
+        json.dumps(
+            {
+                "automation.run_id": "run-1",
+                "automation.repository": "org/repo",
+                "automation.ref": "refs/heads/main",
+                "automation.provider": "github",
+            }
+        ),
+    )
+    monkeypatch.delenv("AUTOMATION_EVENT_PAYLOAD", raising=False)
+
+    tags = automation_conversation_tags()
+
+    assert tags["bridgerepo"] == "github.com/org/repo"
+    assert tags["bridgebase"] == "main"
+    assert tags["bridgemode"] == "cloudagent"
+    assert tags["bridgearchived"] == "false"
 
 
 def test_automation_conversation_kwargs_include_product_and_observability_tags(
@@ -75,6 +99,8 @@ def test_automation_conversation_kwargs_include_product_and_observability_tags(
         "automationtrigger": "automation",
         "automationid": "auto-1",
         "automationrunid": "run-1",
+        "bridgemode": "cloudagent",
+        "bridgearchived": "false",
         "custom": "tag",
     }
     observability_metadata = kwargs.get("observability_metadata")
@@ -84,6 +110,23 @@ def test_automation_conversation_kwargs_include_product_and_observability_tags(
     )
     assert kwargs.get("observability_tags") == ["automation", "polling"]
     assert kwargs.get("observability_span_name") == "automation.conversation"
+
+
+def test_automation_conversation_kwargs_stamp_explicit_repository(monkeypatch):
+    monkeypatch.delenv("AUTOMATION_EVENT_PAYLOAD", raising=False)
+    monkeypatch.setenv(
+        "OPENHANDS_OBSERVABILITY_METADATA", '{"automation.run_id":"run-1"}'
+    )
+
+    kwargs = automation_conversation_kwargs(
+        repository="https://git.example.com/infr/tools/meet.git",
+        ref="main",
+    )
+
+    tags = kwargs.get("tags") or {}
+    assert tags["bridgerepo"] == "git.example.com/infr/tools/meet"
+    assert tags["bridgebase"] == "main"
+    assert tags["bridgemode"] == "cloudagent"
 
 
 def test_automation_conversation_kwargs_uses_env_span_name(monkeypatch):

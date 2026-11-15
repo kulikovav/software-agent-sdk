@@ -12,6 +12,10 @@ from openhands.sdk.observability.laminar import (
     observability_parent_span_context_from_env,
     observability_tags_from_env,
 )
+from openhands.sdk.workspace.bridge_tags import (
+    automation_bridge_tags,
+    bridge_repo_tags,
+)
 
 
 logger = get_logger(__name__)
@@ -20,6 +24,9 @@ _AUTOMATION_ID_KEY = "automation.id"
 _AUTOMATION_NAME_KEY = "automation.name"
 _AUTOMATION_RUN_ID_KEY = "automation.run_id"
 _AUTOMATION_TRIGGER_SOURCE_KEY = "automation.trigger_source"
+_AUTOMATION_REPO_KEY = "automation.repository"
+_AUTOMATION_REF_KEY = "automation.ref"
+_AUTOMATION_PROVIDER_KEY = "automation.provider"
 _DEFAULT_AUTOMATION_SPAN_NAME = "automation.conversation"
 
 
@@ -102,7 +109,12 @@ def automation_observability_context(
 def automation_conversation_tags(
     metadata: Mapping[str, TraceMetadataValue] | None = None,
 ) -> dict[str, str]:
-    """Build product conversation tags from automation observability metadata."""
+    """Build product conversation tags from automation observability metadata.
+
+    The bridge family rides the result: repository provenance from the
+    metadata (or from ``AUTOMATION_EVENT_PAYLOAD`` when the metadata leaves
+    it open) and the ownership/archive marks beside the run id.
+    """
     merged_metadata = _merge_metadata(metadata)
     tags: dict[str, str] = {}
 
@@ -120,7 +132,17 @@ def automation_conversation_tags(
     if automation_run_id:
         tags["automationrunid"] = automation_run_id
 
-    return tags
+    # The event payload backfills provenance the metadata leaves open.
+    repository = _metadata_str(merged_metadata, _AUTOMATION_REPO_KEY)
+    if repository:
+        tags.update(
+            bridge_repo_tags(
+                repository,
+                _metadata_str(merged_metadata, _AUTOMATION_REF_KEY),
+                _metadata_str(merged_metadata, _AUTOMATION_PROVIDER_KEY),
+            )
+        )
+    return automation_bridge_tags(tags)
 
 
 def automation_conversation_kwargs(
@@ -131,11 +153,20 @@ def automation_conversation_kwargs(
     span_name: str | None = None,
     parent_span_context: str | None = None,
     include_conversation_tags: bool = True,
+    repository: str | None = None,
+    ref: str | None = None,
+    provider: str | None = None,
 ) -> AutomationConversationKwargs:
     """Return kwargs to pass into ``Conversation(...)`` from an automation script.
 
     Example:
         ``Conversation(..., **automation_conversation_kwargs())``
+
+    A run that works with a repository can pass its repository (and the ref it
+    branches from) explicitly, so the conversation carries the bridge
+    ``bridgerepo``/``bridgebase`` tags without payload plumbing. Explicit
+    arguments override tags derived from metadata, and caller
+    ``conversation_tags`` win last.
     """
     kwargs: AutomationConversationKwargs = {}
     resolved_span_name = (
@@ -160,6 +191,8 @@ def automation_conversation_kwargs(
 
     if include_conversation_tags:
         merged_conversation_tags = automation_conversation_tags(metadata)
+        if repository:
+            merged_conversation_tags.update(bridge_repo_tags(repository, ref, provider))
         if conversation_tags:
             merged_conversation_tags.update(dict(conversation_tags))
         if merged_conversation_tags:

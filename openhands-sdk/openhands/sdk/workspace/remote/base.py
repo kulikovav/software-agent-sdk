@@ -1,4 +1,3 @@
-import json
 import os
 from collections.abc import Generator
 from pathlib import Path
@@ -16,6 +15,10 @@ from openhands.sdk.mcp.config import MCPServer
 from openhands.sdk.settings import SecretsListResponse, SettingsResponse
 from openhands.sdk.utils.pydantic_secrets import client_context
 from openhands.sdk.workspace.base import BaseWorkspace
+from openhands.sdk.workspace.bridge_tags import (
+    automation_bridge_tags,
+    read_automation_event_payload,
+)
 from openhands.sdk.workspace.models import CommandResult, FileOperationResult
 from openhands.sdk.workspace.remote.remote_workspace_mixin import RemoteWorkspaceMixin
 from openhands.sdk.workspace.repo import (
@@ -285,6 +288,9 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
           - automationid: The automation's unique identifier
           - automationname: Human-readable automation name
           - automationrunid: The specific run identifier
+          - the Cursor bridge family beside the run id (see
+            ``openhands.sdk.workspace.bridge_tags``), with the repository
+            provenance when the payload names a repository
 
         Returns:
             Dictionary of tag key-value pairs (empty when no automation env
@@ -293,26 +299,20 @@ class RemoteWorkspace(RemoteWorkspaceMixin, BaseWorkspace):
         """
         tags: dict[str, str] = {}
 
-        # Parse AUTOMATION_EVENT_PAYLOAD (injected by dispatcher)
-        payload_str = os.environ.get("AUTOMATION_EVENT_PAYLOAD")
-        if payload_str:
-            try:
-                payload = json.loads(payload_str)
-                if isinstance(payload, dict):
-                    if payload.get("trigger"):
-                        tags["automationtrigger"] = str(payload["trigger"])
-                    if payload.get("automation_id"):
-                        tags["automationid"] = str(payload["automation_id"])
-                    if payload.get("automation_name"):
-                        tags["automationname"] = str(payload["automation_name"])
-            except (json.JSONDecodeError, TypeError):
-                logger.error("Failed to parse AUTOMATION_EVENT_PAYLOAD")
+        payload = read_automation_event_payload()
+        if payload:
+            if payload.get("trigger"):
+                tags["automationtrigger"] = str(payload["trigger"])
+            if payload.get("automation_id"):
+                tags["automationid"] = str(payload["automation_id"])
+            if payload.get("automation_name"):
+                tags["automationname"] = str(payload["automation_name"])
 
         run_id = os.environ.get("AUTOMATION_RUN_ID")
         if run_id:
             tags["automationrunid"] = run_id
 
-        return tags
+        return automation_bridge_tags(tags, event_payload=payload)
 
     def register_conversation(self, conversation_id: str) -> None:
         """Register a conversation ID with this workspace.

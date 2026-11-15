@@ -14,6 +14,7 @@ from pydantic import Field, PrivateAttr, SecretStr, ValidationError
 
 from openhands.sdk.logger import get_logger
 from openhands.sdk.mcp.config import MCPServer, MCPTransport, coerce_mcp_config
+from openhands.sdk.workspace.bridge_tags import automation_bridge_tags
 from openhands.sdk.workspace.remote.base import RemoteWorkspace
 from openhands.sdk.workspace.repo import CloneResult, RepoMapping, RepoSource
 
@@ -197,6 +198,10 @@ class OpenHandsCloudWorkspace(RemoteWorkspace):
         Extends ``RemoteWorkspace.default_conversation_tags`` (derived from the
         dispatcher-injected automation env vars) with the sandbox-scoped
         ``_automation_run_id`` fallback captured in local agent-server mode.
+        ``automation_bridge_tags`` stamps the ownership and archive marks only
+        when the tag set carries ``automationrunid``; in local agent-server
+        mode this fallback is what supplies that run id, so it unlocks the
+        marks.
 
         Note: Skills/plugins are NOT included here - they are passed when creating
         the RemoteConversation and merged at that level.
@@ -207,7 +212,7 @@ class OpenHandsCloudWorkspace(RemoteWorkspace):
         tags = dict(super().default_conversation_tags or {})
         if "automationrunid" not in tags and self._automation_run_id:
             tags["automationrunid"] = self._automation_run_id
-        return tags
+        return automation_bridge_tags(tags)
 
     @property
     def client(self) -> httpx.Client:
