@@ -81,6 +81,50 @@ class TestDefaultConversationTags:
             workspace._automation_run_id = "attr-run-id"
             tags = workspace.default_conversation_tags
             assert tags["automationrunid"] == "attr-run-id"
+            assert tags["bridgemode"] == "cloudagent"
+            assert tags["bridgearchived"] == "false"
+
+    def test_stamps_the_payload_repository_provenance(self, workspace):
+        """A run whose payload names a repository carries the provenance."""
+        payload = {
+            "trigger": "cron",
+            "automation_id": "auto-1",
+            "automation_name": "Monitor",
+            "repo": "https://github.com/org/repo",
+            "ref": "main",
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "AUTOMATION_EVENT_PAYLOAD": json.dumps(payload),
+                "AUTOMATION_RUN_ID": "run-1",
+            },
+        ):
+            tags = workspace.default_conversation_tags
+
+        assert tags["bridgerepo"] == "github.com/org/repo"
+        assert tags["bridgebase"] == "main"
+        assert tags["bridgemode"] == "cloudagent"
+        assert tags["bridgearchived"] == "false"
+
+    def test_stamps_the_webhook_repository_provenance(self, workspace):
+        """A git-triggered run derives the provenance from the event itself."""
+        payload = {
+            "trigger": "webhook",
+            "automation_id": "auto-1",
+            "repository": {
+                "full_name": "octocat/hello-world",
+                "html_url": "https://github.com/octocat/hello-world",
+            },
+            "pull_request": {"base": {"ref": "main"}},
+        }
+        with patch.dict(os.environ, {"AUTOMATION_EVENT_PAYLOAD": json.dumps(payload)}):
+            tags = workspace.default_conversation_tags
+
+        assert tags["bridgerepo"] == "github.com/octocat/hello-world"
+        assert tags["bridgebase"] == "main"
+        # The ownership mark rides the run id alone, not a bare repository.
+        assert "bridgemode" not in tags
 
     def test_handles_invalid_json_payload(self, workspace):
         """Should handle invalid JSON in AUTOMATION_EVENT_PAYLOAD gracefully."""
@@ -116,6 +160,8 @@ class TestDefaultConversationTags:
             assert tags["automationid"] == "auto-abc"
             assert tags["automationname"] == "PR Review Bot"
             assert tags["automationrunid"] == "run-xyz"
+            assert tags["bridgemode"] == "cloudagent"
+            assert tags["bridgearchived"] == "false"
             # Skills are NOT included in workspace tags
             assert "skills" not in tags
 
@@ -161,7 +207,51 @@ class TestRemoteWorkspaceDefaultConversationTags:
                 "automationid": "auto-abc",
                 "automationname": "Nightly Audit",
                 "automationrunid": "run-xyz",
+                "bridgemode": "cloudagent",
+                "bridgearchived": "false",
             }
+
+    def test_stamps_the_gitlab_project_provenance(self, workspace):
+        """A GitLab-triggered run reads the project object and its target."""
+        payload = {
+            "trigger": "webhook",
+            "project": {
+                "web_url": "https://git.example.com/infr/tools/meet",
+                "path_with_namespace": "infr/tools/meet",
+            },
+            "object_attributes": {"target_branch": "main"},
+        }
+        with patch.dict(os.environ, {"AUTOMATION_EVENT_PAYLOAD": json.dumps(payload)}):
+            tags = workspace.default_conversation_tags
+
+        assert tags["bridgerepo"] == "git.example.com/infr/tools/meet"
+        assert tags["bridgebase"] == "main"
+
+    def test_normalizes_or_omits_the_payload_ref(self, workspace):
+        """A push ref loses its prefix; a ref the bridge refuses is omitted."""
+
+        def tags_for_ref(ref):
+            payload = {"trigger": "push", "ref": ref}
+            with patch.dict(
+                os.environ, {"AUTOMATION_EVENT_PAYLOAD": json.dumps(payload)}
+            ):
+                return workspace.default_conversation_tags
+
+        assert tags_for_ref("refs/heads/main")["bridgebase"] == "main"
+        assert "bridgebase" not in tags_for_ref("refs/heads/bad ref")
+
+    def test_drops_a_repository_value_the_tags_validator_refuses(self, workspace):
+        """An over-long payload value is dropped, not raised at create time."""
+        payload = {
+            "trigger": "cron",
+            "repo": f"https://github.com/org/{'r' * 300}",
+            "ref": "main",
+        }
+        with patch.dict(os.environ, {"AUTOMATION_EVENT_PAYLOAD": json.dumps(payload)}):
+            tags = workspace.default_conversation_tags
+
+        assert "bridgerepo" not in tags
+        assert tags["bridgebase"] == "main"
 
 
 class TestConversationTagMerging:
