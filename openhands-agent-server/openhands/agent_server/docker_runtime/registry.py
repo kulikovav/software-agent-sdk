@@ -84,6 +84,9 @@ class ConversationContainer:
     host: str
     api_key: str
     container_id: str
+    # CA bundle for a driver whose target is HTTPS (the OpenShell service
+    # exposure runs on the gateway listener).
+    ca_bundle: str | None = None
 
     def stop(self) -> None:
         result = execute_command(["docker", "stop", self.container_id])

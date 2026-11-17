@@ -114,6 +114,32 @@ async def test_http_setup_failure_closes_client_and_preserves_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_http_target_ca_bundle_reaches_the_httpx_client(monkeypatch, tmp_path):
+    import httpx
+
+    from openhands.agent_server.docker_runtime import proxy
+
+    request, target = request_and_target()
+    target.ca_bundle = str(tmp_path / "ca.crt")
+    seen = {}
+
+    def respond(_request):
+        return httpx.Response(200, content=b"ok")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+
+    def client_factory(**kwargs):
+        seen.update(kwargs)
+        return client
+
+    monkeypatch.setattr(proxy.httpx, "AsyncClient", client_factory)
+    response = await proxy.proxy_http(request, target, upstream_path="/api/test")
+    await response.body_iterator.aclose()
+
+    assert seen["verify"] == target.ca_bundle
+
+
+@pytest.mark.asyncio
 async def test_http_client_lives_until_the_stream_is_consumed(monkeypatch):
     import httpx
 
