@@ -1,12 +1,13 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from starlette.requests import Request
@@ -1008,3 +1009,32 @@ def test_governed_start_refuses_a_worktree(tmp_path, monkeypatch):
 
     assert response.status_code == 422
     assert "sandbox workspace" in response.json()["detail"]
+
+
+def test_governed_workspace_maps_the_docker_root_to_the_sandbox():
+    registry = SimpleNamespace(governed=True, inner_workspace_root="/sandbox")
+
+    working_dir, host_workspace = routers._resolve_workspace(
+        registry, None, {"working_dir": "/workspace"}
+    )
+
+    assert working_dir == "/sandbox"
+    assert host_workspace is None
+
+
+def test_governed_workspace_refuses_another_host_path():
+    registry = SimpleNamespace(governed=True, inner_workspace_root="/sandbox")
+
+    with pytest.raises(HTTPException, match="sandbox workspace"):
+        routers._resolve_workspace(registry, None, {"working_dir": "/tmp/project"})
+
+
+def test_docker_workspace_keeps_a_host_path():
+    registry = SimpleNamespace(governed=False, inner_workspace_root="/workspace")
+
+    working_dir, host_workspace = routers._resolve_workspace(
+        registry, None, {"working_dir": "/tmp/project"}
+    )
+
+    assert working_dir == "/tmp/project"
+    assert host_workspace == Path("/tmp/project")
