@@ -180,12 +180,16 @@ def test_rejects_a_custom_server_without_a_command(client: TestClient) -> None:
     assert response.status_code == 422
 
 
-def test_is_unavailable_when_conversations_run_in_containers(
-    client: TestClient, config: Config, fake_discovery: _FakeDiscovery
+@pytest.mark.parametrize("runtime", ["docker", "openshell"])
+def test_is_unavailable_when_conversations_run_offhost(
+    client: TestClient,
+    config: Config,
+    fake_discovery: _FakeDiscovery,
+    runtime: str,
 ) -> None:
     app = client.app
     assert isinstance(app, FastAPI)
-    app.state.config = config.model_copy(update={"conversation_runtime": "docker"})
+    app.state.config = config.model_copy(update={"conversation_runtime": runtime})
 
     response = _discover(client)
 

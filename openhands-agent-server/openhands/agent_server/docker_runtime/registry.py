@@ -53,7 +53,7 @@ _OWNER_LABEL: Final[str] = "ai.openhands.runtime-owner"
 # Environment variables read by openhands.sdk.observability (Laminar / OTEL
 # tracing). Only those actually set on the host are forwarded into the
 # conversation container, so an unconfigured host injects nothing.
-_OBSERVABILITY_ENV_VARS: Final[tuple[str, ...]] = (
+OBSERVABILITY_ENV_VARS: Final[tuple[str, ...]] = (
     "LMNR_PROJECT_API_KEY",
     "LMNR_BASE_URL",
     "LMNR_HTTP_PORT",
@@ -87,7 +87,6 @@ class ConversationContainer:
     host: str
     api_key: str
     container_id: str
-    # CA bundle for an HTTPS proxy target.
     ca_bundle: str | None = None
 
     def stop(self) -> None:
@@ -695,7 +694,7 @@ class DockerConversationRegistry(ConversationRegistry):
 
         # Forward host observability configuration so the in-container agent
         # server initializes tracing with the same Laminar/OTEL backend.
-        for name in _OBSERVABILITY_ENV_VARS:
+        for name in OBSERVABILITY_ENV_VARS:
             value = os.environ.get(name)
             if value:
                 env[name] = value
@@ -716,7 +715,7 @@ class DockerConversationRegistry(ConversationRegistry):
             "DEBUG",
         ]
         forwarded_env_names.extend(
-            name for name in _OBSERVABILITY_ENV_VARS if name in env
+            name for name in OBSERVABILITY_ENV_VARS if name in env
         )
         for name in forwarded_env_names:
             if name in env:

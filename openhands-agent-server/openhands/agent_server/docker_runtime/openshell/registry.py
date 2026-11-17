@@ -13,7 +13,7 @@ from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
 from openhands.agent_server.docker_runtime.openshell.client import OpenShellGateway
 from openhands.agent_server.docker_runtime.provisioning import RuntimeIdentity
 from openhands.agent_server.docker_runtime.registry import (
-    _OBSERVABILITY_ENV_VARS,
+    OBSERVABILITY_ENV_VARS,
     ConversationContainer,
     DockerConversationRegistry,
     RuntimeArchivedError,
@@ -79,8 +79,10 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
         )
 
     async def shutdown(self) -> None:
-        await super().shutdown()
-        self.gateway.close()
+        try:
+            await super().shutdown()
+        finally:
+            self.gateway.close()
 
     def sandbox_name(self, conversation_id: UUID) -> str:
         # The gateway caps a sandbox name at 19 characters, so the name keeps
@@ -90,12 +92,16 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
     def cleanup_stale_containers(self) -> None:
         """The gateway owns sandbox cleanup; there is no host runtime to scan."""
 
+    def serves_persisted_event_reads(self, _conversation_id: UUID) -> bool:
+        """Conversation state lives in the sandbox, so reads proxy to it."""
+        return False
+
     def _build_container(self, conversation_id: UUID) -> ConversationContainer:
         identity = self.provisioning.load(conversation_id)
         name = self.sandbox_name(conversation_id)
         created = False
-        # The label carries the full conversation id, so it identifies the
-        # sandbox even when the name had to be shortened.
+        # Lookup by label, not name: the label carries the full id (see
+        # sandbox_name), so a shortened name still identifies its sandbox.
         sandbox = self.gateway.find(f"{_CONVERSATION_LABEL}={conversation_id.hex}")
         if sandbox is None:
             sandbox = self.gateway.get(name)
@@ -103,7 +109,11 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
                 sandbox is not None
                 and sandbox.labels.get(_CONVERSATION_LABEL) != conversation_id.hex
             ):
-                raise RuntimeError("Sandbox name collision")
+                raise RuntimeError(
+                    f"Sandbox name collision: {name} holds "
+                    f"{sandbox.labels.get(_CONVERSATION_LABEL)}, "
+                    f"not {conversation_id.hex}"
+                )
         if sandbox is None and identity.service_url:
             # The sandbox held the conversation state, so a recorded runtime
             # the gateway no longer has cannot be resumed.
@@ -156,6 +166,11 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             raise
         except Exception:
             if created:
+                # The identity already names the sandbox URL; a retry would
+                # otherwise read it as an archived runtime.
+                self.provisioning.save(
+                    identity.model_copy(update={"service_url": None})
+                )
                 try:
                     self.gateway.delete(name)
                 except Exception:
@@ -177,7 +192,7 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             environment["OH_RUNTIME_LAUNCHED_PROFILE"] = (
                 identity.launched_agent_profile.model_dump_json()
             )
-        for name in _OBSERVABILITY_ENV_VARS:
+        for name in OBSERVABILITY_ENV_VARS:
             value = os.environ.get(name)
             if value:
                 environment[name] = value
@@ -198,14 +213,22 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
 
     def copy_conversation_record(self, conversation_id: UUID) -> None:
         """Copy the inner conversation record into the outer catalog."""
-        text = self.gateway.read_file(
-            self._existing_sandbox_name(conversation_id),
-            f"{_SANDBOX_CONVERSATIONS}/{conversation_id.hex}/meta.json",
-        )
-        if text is None:
-            return
-        target = self.conversation_dir(conversation_id) / "meta.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.tmp")
-        temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, target)
+        sandbox = self._existing_sandbox_name(conversation_id)
+        base = f"{_SANDBOX_CONVERSATIONS}/{conversation_id.hex}"
+        # The catalog builds each conversation from base_state.json; meta.json
+        # only carries the listing fields.
+        for name in ("meta.json", "base_state.json"):
+            text = self.gateway.read_file(sandbox, f"{base}/{name}")
+            if text is None:
+                logger.warning(
+                    "Conversation %s has no %s in sandbox %s",
+                    conversation_id,
+                    name,
+                    sandbox,
+                )
+                continue
+            target = self.conversation_dir(conversation_id) / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.tmp")
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, target)

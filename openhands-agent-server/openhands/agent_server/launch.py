@@ -90,7 +90,7 @@ def live_launch_runtime(
 
 def target_launch_runtime(config: Config) -> LaunchRuntime:
     """Describe the runtime this server's launches run in, without starting it."""
-    if config.conversation_runtime == "docker":
+    if config.conversations_run_offhost:
         # The container image sets managed sourcing.
         return LaunchRuntime(
             browser_available=container_browser_enabled(config),
@@ -103,12 +103,12 @@ def target_launch_runtime(config: Config) -> LaunchRuntime:
 
 def can_probe_tools(config: Config) -> bool:
     """Whether conversations run in this process, so tool usability can be probed."""
-    return config.conversation_runtime != "docker"
+    return not config.conversations_run_offhost
 
 
 def configured_browser_available(config: Config) -> bool | None:
     """Browser availability fixed by ``config``; ``None`` means probe this process."""
-    if config.conversation_runtime == "docker":
+    if config.conversations_run_offhost:
         return container_browser_enabled(config)
     return None if config.enable_browser else False
 

@@ -50,7 +50,10 @@ def config(tmp_path, monkeypatch) -> Config:
 async def _forward(
     request: StartConversationRequest, runtime_config: Config, *, existing=False
 ) -> tuple[dict[str, Any], Any, RuntimeIdentity]:
-    registry = cast(DockerConversationRegistry, SimpleNamespace(config=runtime_config))
+    registry = cast(
+        DockerConversationRegistry,
+        SimpleNamespace(config=runtime_config, governed=False),
+    )
     body = request.model_dump(mode="json", context={"expose_secrets": True})
     payload, launched, _, _ = await _prepare_forward(body, registry, existing=existing)
     provisioning = RuntimeProvisioningStore(runtime_config)
@@ -62,7 +65,10 @@ async def _forward(
 @pytest.mark.parametrize("worktree", [False, True])
 async def test_forward_preserves_worktree_flag(tmp_path, monkeypatch, worktree):
     runtime_config = config(tmp_path, monkeypatch)
-    registry = cast(DockerConversationRegistry, SimpleNamespace(config=runtime_config))
+    registry = cast(
+        DockerConversationRegistry,
+        SimpleNamespace(config=runtime_config, governed=False),
+    )
     request = StartConversationRequest(
         workspace=LocalWorkspace(working_dir="/workspace"),
         agent=Agent(llm=LLM(model="test", api_key=SecretStr("model-key"))),
@@ -166,7 +172,10 @@ async def test_every_encrypted_field_reaches_the_container_decryptable(
         secrets_encrypted=True,
     )
     body = request.model_dump(mode="json", context={"cipher": runtime_config.cipher})
-    registry = cast(DockerConversationRegistry, SimpleNamespace(config=runtime_config))
+    registry = cast(
+        DockerConversationRegistry,
+        SimpleNamespace(config=runtime_config, governed=False),
+    )
 
     payload, _, _, _ = await _prepare_forward(body, registry, existing=False)
     identity = RuntimeProvisioningStore(runtime_config).create(uuid4())

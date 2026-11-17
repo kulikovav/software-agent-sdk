@@ -157,7 +157,7 @@ async def discover_models(
     ``error`` rather than as an HTTP error.
     """
     config: Config = get_config(request)
-    if config.conversation_runtime == "docker":
+    if config.conversations_run_offhost:
         raise HTTPException(
             status.HTTP_501_NOT_IMPLEMENTED,
             "ACP model discovery runs only where conversations run in-process",

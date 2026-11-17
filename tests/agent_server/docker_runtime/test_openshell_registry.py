@@ -320,14 +320,49 @@ def test_copy_conversation_record_writes_the_outer_record(tmp_path):
     gateway = FakeGateway()
     registry = make_registry(tmp_path, gateway)
     conversation_id = uuid4()
-    gateway.files[f"/sandbox/conversations/{conversation_id.hex}/meta.json"] = (
-        '{"id": "conversation"}'
-    )
+    base = f"/sandbox/conversations/{conversation_id.hex}"
+    gateway.files[f"{base}/meta.json"] = '{"id": "conversation"}'
+    gateway.files[f"{base}/base_state.json"] = '{"agent": {}}'
 
     registry.copy_conversation_record(conversation_id)
 
-    record = registry.conversation_dir(conversation_id) / "meta.json"
-    assert record.read_text(encoding="utf-8") == '{"id": "conversation"}'
+    record = registry.conversation_dir(conversation_id)
+    assert (record / "meta.json").read_text(
+        encoding="utf-8"
+    ) == '{"id": "conversation"}'
+    # The catalog builds the conversation from base_state.json.
+    assert (record / "base_state.json").read_text(encoding="utf-8") == '{"agent": {}}'
+
+
+def test_a_failed_created_start_clears_the_recorded_url(tmp_path, monkeypatch):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    conversation_id = uuid4()
+    registry.provisioning.create(conversation_id)
+
+    def not_ready(_container):
+        raise RuntimeError("sandbox did not become ready")
+
+    monkeypatch.setattr(registry, "_wait_until_ready", not_ready)
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        registry._build_container(conversation_id)
+
+    assert gateway.deleted == [registry.sandbox_name(conversation_id)]
+    assert registry.provisioning.load(conversation_id).service_url is None
+
+    # A retry recreates the sandbox instead of reading the failure as an
+    # archived conversation.
+    monkeypatch.setattr(registry, "_wait_until_ready", lambda container: None)
+    container = registry._build_container(conversation_id)
+
+    assert container.host.startswith("https://")
+    assert len(gateway.created) == 2
+
+
+def test_event_reads_are_not_served_from_the_host(tmp_path):
+    registry = make_registry(tmp_path, FakeGateway())
+
+    assert registry.serves_persisted_event_reads(uuid4()) is False
 
 
 def test_delete_runtime_deletes_the_sandbox(tmp_path):

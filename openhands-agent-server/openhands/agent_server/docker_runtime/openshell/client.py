@@ -32,8 +32,7 @@ class OpenShellGateway:
     ) -> None:
         self.workspace = workspace
         # The SDK composes service URLs on the gateway's internal listener
-        # port. A published gateway listens elsewhere, so the driver rewrites
-        # the port when the deployment sets one.
+        # port, not the published one.
         self.service_port = service_port
         self._client = SandboxClient.from_active_cluster(cluster=cluster)
 
@@ -41,11 +40,19 @@ class OpenShellGateway:
         self._client.close()
 
     def find(self, selector: str) -> SandboxRef | None:
-        """The first sandbox that matches a label selector, if any."""
+        """The sandbox that matches a label selector, if any."""
         sandboxes = self._client.list_all(
             workspace=self.workspace, label_selector=selector
         )
-        return sandboxes[0] if sandboxes else None
+        if not sandboxes:
+            return None
+        if len(sandboxes) > 1:
+            logger.warning(
+                "Several sandboxes match %s: %s",
+                selector,
+                ", ".join(sorted(sandbox.name for sandbox in sandboxes)),
+            )
+        return sorted(sandboxes, key=lambda sandbox: sandbox.name)[0]
 
     def create(
         self,
@@ -65,13 +72,24 @@ class OpenShellGateway:
         )
         if provider:
             spec.providers.append(provider)
-        created = self._client.create(
-            workspace=self.workspace,
-            spec=spec,
-            name=name,
-            labels=dict(labels),
-            service_exposures=[ServiceExposure(target_port=expose_port)],
-        )
+        try:
+            created = self._client.create(
+                workspace=self.workspace,
+                spec=spec,
+                name=name,
+                labels=dict(labels),
+                service_exposures=[ServiceExposure(target_port=expose_port)],
+            )
+        except grpc.RpcError as exc:
+            if exc.code() != grpc.StatusCode.ALREADY_EXISTS:
+                raise
+            # Another process won the race for this conversation; adopt its
+            # sandbox instead of running a second one.
+            existing = self.get(name)
+            if existing is None:
+                raise
+            logger.warning("Adopted sandbox %s created by another process", name)
+            return existing
         # Only the create response carries the service URLs; a later read of
         # the sandbox cannot recover them.
         urls = {key: self.service_url(url) for key, url in created.service_urls.items()}
@@ -107,6 +125,7 @@ class OpenShellGateway:
         return self._client.start(name, workspace=self.workspace)
 
     def stop(self, name: str) -> None:
+        """Stop the sandbox; a missing sandbox stays a no-op."""
         try:
             self._client.stop(name, workspace=self.workspace)
         except grpc.RpcError as exc:
@@ -117,13 +136,21 @@ class OpenShellGateway:
         self._client.delete(name, workspace=self.workspace, allow_missing=True)
 
     def read_file(self, name: str, path: str) -> str | None:
-        """One file from a running sandbox, or ``None`` when it is absent."""
+        """One file from a sandbox, or ``None`` when the read fails."""
         try:
             result = self._client.exec(name, ["cat", path], workspace=self.workspace)
         except grpc.RpcError as exc:
             logger.warning("Could not read %s from sandbox %s: %s", path, name, exc)
             return None
-        return result.stdout if result.exit_code == 0 else None
+        if result.exit_code != 0:
+            logger.warning(
+                "Could not read %s from sandbox %s: exit %s",
+                path,
+                name,
+                result.exit_code,
+            )
+            return None
+        return result.stdout
 
     def _require_tls(self, url: str) -> None:
         # The proxy forwards the inner session key to this URL.
