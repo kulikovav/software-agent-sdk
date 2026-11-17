@@ -16,12 +16,15 @@ from openhands.agent_server.docker_runtime.registry import RuntimeArchivedError
 from openhands.agent_server.models import ConversationRuntimeStatus
 
 
-def make_sandbox(name, phase=pb.SANDBOX_PHASE_READY, service_urls=None):
+def make_sandbox(
+    name, phase=pb.SANDBOX_PHASE_READY, service_urls=None, conversation_hex=""
+):
     return SandboxRef(
         id=name,
         name=name,
         workspace="default",
         status=SandboxStatusRef(phase=phase, current_policy_version=1),
+        labels={"openhands.conversation": conversation_hex} if conversation_hex else {},
         service_urls=service_urls or {},
     )
 
@@ -31,6 +34,7 @@ class FakeGateway(OpenShellGateway):
         self.service_port = None
         self.workspace = "default"
         self.existing = existing
+        self.found = None
         self.created = []
         self.deleted = []
         self.started = []
@@ -44,13 +48,14 @@ class FakeGateway(OpenShellGateway):
         return None
 
     def find(self, selector):
-        return None
+        return self.found
 
     def create(self, **kwargs):
         self.created.append(kwargs)
         return make_sandbox(
             kwargs["name"],
             service_urls={"": "https://default--oh-test.openshell.localhost:17670/"},
+            conversation_hex=kwargs["labels"]["openhands.conversation"],
         )
 
     def start(self, name):
@@ -95,7 +100,8 @@ def test_build_container_creates_a_sandbox_and_records_its_url(tmp_path, monkeyp
     assert container.ca_bundle == str(tmp_path / "ca.crt")
 
     create = gateway.created[0]
-    assert create["name"] == f"oh-{conversation_id.hex}"
+    assert create["name"] == registry.sandbox_name(conversation_id)
+    assert len(create["name"]) <= 19
     assert create["labels"]["openhands.conversation"] == conversation_id.hex
     assert create["expose_port"] == 8000
     assert create["command"][:2] == ["openhands-agent-server", "--host"]
@@ -117,7 +123,9 @@ def test_build_container_adopts_the_sandbox_by_name(tmp_path, monkeypatch):
     registry.provisioning.create(conversation_id)
     created = registry._build_container(conversation_id)
 
-    gateway.existing = make_sandbox(gateway.created[0]["name"])
+    gateway.existing = make_sandbox(
+        gateway.created[0]["name"], conversation_hex=conversation_id.hex
+    )
     gateway.created.clear()
     adopted = registry._build_container(conversation_id)
 
@@ -143,6 +151,37 @@ async def test_concurrent_starts_create_one_sandbox(tmp_path, monkeypatch):
     assert first.container_id == second.container_id
 
 
+def test_build_container_adopts_a_sandbox_found_by_label(tmp_path, monkeypatch):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    monkeypatch.setattr(registry, "_wait_until_ready", lambda container: None)
+    conversation_id = uuid4()
+    identity = registry.provisioning.create(conversation_id)
+    registry.provisioning.save(
+        identity.model_copy(update={"service_url": "https://sandbox:17670"})
+    )
+    gateway.found = make_sandbox("oh-legacy", conversation_hex=conversation_id.hex)
+
+    container = registry._build_container(conversation_id)
+
+    assert gateway.created == []
+    assert container.container_id == "oh-legacy"
+    assert container.host == "https://sandbox:17670"
+
+
+def test_a_name_collision_is_refused(tmp_path):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    conversation_id = uuid4()
+    registry.provisioning.create(conversation_id)
+    gateway.existing = make_sandbox(registry.sandbox_name(conversation_id))
+
+    with pytest.raises(RuntimeError, match="collision"):
+        registry._build_container(conversation_id)
+
+    assert gateway.created == []
+
+
 def test_build_container_starts_a_stopped_sandbox(tmp_path, monkeypatch):
     gateway = FakeGateway()
     registry = make_registry(tmp_path, gateway)
@@ -153,7 +192,9 @@ def test_build_container_starts_a_stopped_sandbox(tmp_path, monkeypatch):
         identity.model_copy(update={"service_url": "https://sandbox:17670"})
     )
     name = registry.sandbox_name(conversation_id)
-    gateway.existing = make_sandbox(name, phase=pb.SANDBOX_PHASE_STOPPED)
+    gateway.existing = make_sandbox(
+        name, phase=pb.SANDBOX_PHASE_STOPPED, conversation_hex=conversation_id.hex
+    )
 
     container = registry._build_container(conversation_id)
 
@@ -204,7 +245,9 @@ def test_a_failed_adopted_start_keeps_the_sandbox(tmp_path, monkeypatch):
     registry.provisioning.save(
         identity.model_copy(update={"service_url": "https://sandbox:17670"})
     )
-    gateway.existing = make_sandbox(registry.sandbox_name(conversation_id))
+    gateway.existing = make_sandbox(
+        registry.sandbox_name(conversation_id), conversation_hex=conversation_id.hex
+    )
 
     def fail(container):
         raise RuntimeError("Conversation container failed to become healthy in time")
