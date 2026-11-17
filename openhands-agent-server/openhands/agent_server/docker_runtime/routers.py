@@ -131,6 +131,30 @@ docker_conversation_router = APIRouter(
 )
 
 
+# Canvas sends ``/workspace`` for a backend it treats as the Docker runtime,
+# where that path is the default workspace. A governed runtime maps the alias to
+# its own sandbox root; every other non-root path is a host path.
+_DEFAULT_WORKSPACE_ALIASES = frozenset({"/workspace"})
+
+
+def _resolve_workspace(
+    registry: ConversationDriver,
+    worktree: object,
+    workspace: dict[str, Any] | None,
+) -> tuple[str, Path | None]:
+    """Resolve the requested workspace, refusing a governed host path."""
+    inner_root = registry.inner_workspace_root
+    working_dir = (workspace or {}).get("working_dir", inner_root)
+    if registry.governed:
+        if worktree or working_dir not in _DEFAULT_WORKSPACE_ALIASES | {inner_root}:
+            raise HTTPException(
+                422,
+                "A governed conversation runs only in the sandbox workspace",
+            )
+        working_dir = inner_root
+    return working_dir, None if working_dir == inner_root else Path(working_dir)
+
+
 @docker_conversation_router.post("")
 async def start_conversation(
     request: Request,
@@ -171,14 +195,9 @@ async def start_docker_conversation(
         or workspace.get("kind", "LocalWorkspace") != "LocalWorkspace"
     ):
         raise HTTPException(422, "Docker conversations require a local workspace")
-    inner_root = registry.inner_workspace_root
-    working_dir = (workspace or {}).get("working_dir", inner_root)
-    if registry.governed and (body.get("worktree") or working_dir != inner_root):
-        raise HTTPException(
-            422,
-            "A governed conversation runs only in the sandbox workspace",
-        )
-    host_workspace = None if working_dir == inner_root else Path(working_dir)
+    working_dir, host_workspace = _resolve_workspace(
+        registry, body.get("worktree"), workspace
+    )
 
     try:
         conversation_id = (
@@ -187,7 +206,10 @@ async def start_docker_conversation(
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, "Invalid conversation_id") from exc
     body["conversation_id"] = str(conversation_id)
-    body["workspace"] = {"kind": "LocalWorkspace", "working_dir": inner_root}
+    body["workspace"] = {
+        "kind": "LocalWorkspace",
+        "working_dir": registry.inner_workspace_root,
+    }
 
     # Only a conversation the container already created is left alone on
     # failure; a manifest from a failed earlier start is retried like a new one.
