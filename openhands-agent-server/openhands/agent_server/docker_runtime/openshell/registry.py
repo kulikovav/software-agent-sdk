@@ -70,7 +70,9 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
     ) -> None:
         super().__init__(config, stores or ServerStores.from_config(config))
         self.gateway = gateway or OpenShellGateway(
-            config.openshell_workspace, cluster=config.openshell_cluster
+            config.openshell_workspace,
+            cluster=config.openshell_cluster,
+            service_port=config.openshell_service_port,
         )
 
     async def shutdown(self) -> None:
