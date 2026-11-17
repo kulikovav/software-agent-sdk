@@ -6,7 +6,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from urllib.parse import urlsplit, urlunsplit
 
-from openshell import SandboxClient, SandboxError, SandboxRef, ServiceExposure
+import grpc
+from openshell import SandboxClient, SandboxRef, ServiceExposure
 from openshell._proto import openshell_pb2 as pb
 
 from openhands.sdk.logger import get_logger
@@ -18,8 +19,8 @@ logger = get_logger(__name__)
 class OpenShellGateway:
     """One gateway connection, shared by the registry's worker threads.
 
-    The SDK is synchronous, so the registry calls every method through
-    ``asyncio.to_thread``.
+    The SDK is synchronous, so the registry calls the blocking methods from
+    worker threads; ``close`` runs on the shutdown path instead.
     """
 
     def __init__(
@@ -39,9 +40,8 @@ class OpenShellGateway:
     def close(self) -> None:
         self._client.close()
 
-    def find(self, conversation_hex: str) -> SandboxRef | None:
-        """The sandbox that already owns this conversation, if any."""
-        selector = f"openhands.conversation={conversation_hex}"
+    def find(self, selector: str) -> SandboxRef | None:
+        """The first sandbox that matches a label selector, if any."""
         sandboxes = self._client.list_all(
             workspace=self.workspace, label_selector=selector
         )
@@ -72,35 +72,60 @@ class OpenShellGateway:
             labels=dict(labels),
             service_exposures=[ServiceExposure(target_port=expose_port)],
         )
-        ready = self._client.wait_ready(name, workspace=self.workspace)
-        # Only the create response carries the URLs; wait_ready drops them.
-        urls = dict(created.service_urls or ready.service_urls)
-        return replace(
-            ready,
-            service_urls={
-                key: self.service_url(url) for key, url in urls.items()
-            },
-        )
+        # Only the create response carries the service URLs; a later read of
+        # the sandbox cannot recover them.
+        urls = {key: self.service_url(url) for key, url in created.service_urls.items()}
+        for url in urls.values():
+            self._require_tls(url)
+        return replace(created, service_urls=urls)
 
     def service_url(self, url: str) -> str:
         """Republish a service URL on the gateway's published port."""
         parts = urlsplit(url)
-        if self.service_port is None or parts.port in (None, self.service_port):
+        if self.service_port is None or parts.port == self.service_port:
             return url.rstrip("/")
-        netloc = f"{parts.hostname or parts.netloc}:{self.service_port}"
+        host = parts.hostname or parts.netloc
+        netloc = (
+            f"[{host}]:{self.service_port}"
+            if ":" in host
+            else f"{host}:{self.service_port}"
+        )
         return urlunsplit(
             (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
         ).rstrip("/")
 
     def get(self, name: str) -> SandboxRef | None:
+        """The sandbox, or ``None`` only when the gateway says it is missing."""
         try:
             return self._client.get(name, workspace=self.workspace)
-        except SandboxError as exc:
-            logger.warning("Could not read sandbox %s: %s", name, exc)
-            return None
+        except grpc.RpcError as exc:
+            if exc.code() == grpc.StatusCode.NOT_FOUND:
+                return None
+            raise
+
+    def start(self, name: str) -> SandboxRef:
+        return self._client.start(name, workspace=self.workspace)
 
     def stop(self, name: str) -> None:
-        self._client.stop(name, workspace=self.workspace)
+        try:
+            self._client.stop(name, workspace=self.workspace)
+        except grpc.RpcError as exc:
+            if exc.code() != grpc.StatusCode.NOT_FOUND:
+                raise
 
     def delete(self, name: str) -> None:
         self._client.delete(name, workspace=self.workspace, allow_missing=True)
+
+    def read_file(self, name: str, path: str) -> str | None:
+        """One file from a running sandbox, or ``None`` when it is absent."""
+        try:
+            result = self._client.exec(name, ["cat", path], workspace=self.workspace)
+        except grpc.RpcError as exc:
+            logger.warning("Could not read %s from sandbox %s: %s", path, name, exc)
+            return None
+        return result.stdout if result.exit_code == 0 else None
+
+    def _require_tls(self, url: str) -> None:
+        # The proxy forwards the inner session key to this URL.
+        if urlsplit(url).scheme != "https":
+            raise RuntimeError("OpenShell published a service URL without TLS")

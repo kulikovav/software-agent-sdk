@@ -32,17 +32,18 @@ class PolicyDenial:
     def summary(self) -> str:
         rule = f" (rule {self.rule})" if self.rule else ""
         return (
-            f"{self.layer} access to {self.destination} was denied: "
-            f"{self.reason}{rule}"
+            f"{self.layer} access to {self.destination} was denied: {self.reason}{rule}"
         )
 
 
 _DENIAL_FIELDS = re.compile(r"([a-z_]+):([^\]\s]+)")
+# The gateway quotes some values, such as `rule "POST /v1"`, so a value can
+# contain spaces and colons that the unquoted scan would misread.
 _QUOTED_FIELDS = re.compile(r'([a-z_]+) "([^"]+)"')
 
 
 def _fields(text: str) -> dict[str, str]:
-    fields = dict(_DENIAL_FIELDS.findall(text))
+    fields = dict(_DENIAL_FIELDS.findall(_QUOTED_FIELDS.sub("", text)))
     fields.update(dict(_QUOTED_FIELDS.findall(text)))
     return fields
 

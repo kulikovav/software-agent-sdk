@@ -1,3 +1,4 @@
+import pytest
 from openshell import SandboxRef, SandboxStatusRef
 
 from openhands.agent_server.docker_runtime.openshell import client as client_module
@@ -5,7 +6,8 @@ from openhands.agent_server.docker_runtime.openshell.client import OpenShellGate
 
 
 class FakeSdkClient:
-    def __init__(self):
+    def __init__(self, url="https://default--demo.openshell.localhost:8080/"):
+        self.url = url
         self.created = None
         self.closed = False
 
@@ -16,33 +18,23 @@ class FakeSdkClient:
             name=kwargs["name"],
             workspace="default",
             status=SandboxStatusRef(phase=1, current_policy_version=1),
-            service_urls={"": "https://default--demo.openshell.localhost:8080/"},
-        )
-
-    def wait_ready(self, name, *, workspace, timeout_seconds=300):
-        return SandboxRef(
-            id="1",
-            name=name,
-            workspace=workspace,
-            status=SandboxStatusRef(phase=2, current_policy_version=1),
+            service_urls={"": self.url},
         )
 
     def close(self):
         self.closed = True
 
 
-def make_gateway(monkeypatch, service_port):
-    sdk = FakeSdkClient()
+def make_gateway(monkeypatch, service_port, url=None):
+    sdk = FakeSdkClient() if url is None else FakeSdkClient(url)
     monkeypatch.setattr(
         client_module.SandboxClient, "from_active_cluster", lambda **kwargs: sdk
     )
     return OpenShellGateway("default", service_port=service_port), sdk
 
 
-def test_create_keeps_the_service_url_and_rewrites_the_published_port(monkeypatch):
-    gateway, sdk = make_gateway(monkeypatch, 17670)
-
-    ref = gateway.create(
+def create(gateway):
+    return gateway.create(
         name="demo",
         image="image:tag",
         command=["agent"],
@@ -52,6 +44,13 @@ def test_create_keeps_the_service_url_and_rewrites_the_published_port(monkeypatc
         expose_port=8000,
     )
 
+
+def test_create_keeps_the_service_url_and_rewrites_the_published_port(monkeypatch):
+    gateway, sdk = make_gateway(monkeypatch, 17670)
+
+    ref = create(gateway)
+
+    assert sdk.created is not None
     exposures = sdk.created["service_exposures"]
     assert [exposure.target_port for exposure in exposures] == [8000]
     assert dict(ref.service_urls) == {
@@ -62,16 +61,17 @@ def test_create_keeps_the_service_url_and_rewrites_the_published_port(monkeypatc
 def test_create_without_a_published_port_keeps_the_sdk_url(monkeypatch):
     gateway, _ = make_gateway(monkeypatch, None)
 
-    ref = gateway.create(
-        name="demo",
-        image="image:tag",
-        command=["agent"],
-        environment={},
-        labels={},
-        provider=None,
-        expose_port=8000,
-    )
+    ref = create(gateway)
 
     assert dict(ref.service_urls) == {
         "": "https://default--demo.openshell.localhost:8080"
     }
+
+
+def test_create_refuses_a_service_url_without_tls(monkeypatch):
+    gateway, _ = make_gateway(
+        monkeypatch, 17670, url="http://default--demo.openshell.localhost:8080/"
+    )
+
+    with pytest.raises(RuntimeError, match="without TLS"):
+        create(gateway)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import ssl
 import subprocess
 import time
 from collections.abc import AsyncIterator, Callable
@@ -84,8 +85,7 @@ class ConversationContainer:
     host: str
     api_key: str
     container_id: str
-    # CA bundle for a driver whose target is HTTPS (the OpenShell service
-    # exposure runs on the gateway listener).
+    # CA bundle for an HTTPS proxy target.
     ca_bundle: str | None = None
 
     def stop(self) -> None:
@@ -127,7 +127,7 @@ class ContainerLease:
 
 class DockerConversationRegistry(ConversationRegistry):
     # The docker runtime mounts the host workspace at /workspace inside the
-    # container; a governed runtime uses its own in-sandbox root instead.
+    # container.
     inner_workspace_root = "/workspace"
     governed = False
 
@@ -438,6 +438,21 @@ class DockerConversationRegistry(ConversationRegistry):
 
     async def stop(self, conversation_id: UUID) -> None:
         await self._stop(conversation_id)
+
+    def delete_runtime(self, conversation_id: UUID) -> None:
+        """Delete runtime storage this registry owns outside the host.
+
+        A Docker container removes itself when it stops; a governed runtime
+        keeps its sandbox until the gateway deletes it.
+        """
+
+    def copy_conversation_record(self, conversation_id: UUID) -> None:
+        """Make the runtime's conversation record readable on the host.
+
+        A Docker runtime bind-mounts ``conversations_path``, so the inner
+        server writes the record in place. A runtime without that mount copies
+        it out instead, or the outer catalog stays empty.
+        """
 
     async def stop_if_idle(
         self,
@@ -779,23 +794,23 @@ class DockerConversationRegistry(ConversationRegistry):
 
     def _wait_until_ready(self, container: ConversationContainer) -> None:
         deadline = time.monotonic() + self.config.conversation_container_startup_timeout
+        # A governed runtime publishes an HTTPS service URL on the gateway's
+        # listener, which the deployment verifies with its own CA.
+        context = (
+            ssl.create_default_context(cafile=container.ca_bundle)
+            if container.ca_bundle
+            else None
+        )
         while time.monotonic() < deadline:
             try:
-                with urlopen(container.host + "/health", timeout=1) as response:
+                with urlopen(
+                    container.host + "/health", timeout=1, context=context
+                ) as response:
                     if 200 <= response.status < 300:
                         return
             except (URLError, TimeoutError, ConnectionError):
                 pass
-            running = execute_command(
-                [
-                    "docker",
-                    "inspect",
-                    "-f",
-                    "{{.State.Running}}",
-                    container.container_id,
-                ]
-            )
-            if running.stdout.strip() != "true":
+            if not container.is_running():
                 raise RuntimeError("Conversation container stopped during startup")
             time.sleep(1)
         raise RuntimeError("Conversation container failed to become healthy in time")
