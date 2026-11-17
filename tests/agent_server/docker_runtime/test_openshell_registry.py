@@ -1,3 +1,4 @@
+import asyncio
 from uuid import uuid4
 
 import grpc
@@ -121,6 +122,23 @@ def test_build_container_adopts_the_sandbox_by_name(tmp_path, monkeypatch):
     assert gateway.created == []
     assert adopted.container_id == created.container_id
     assert adopted.host == created.host
+
+
+@pytest.mark.asyncio
+async def test_concurrent_starts_create_one_sandbox(tmp_path, monkeypatch):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    monkeypatch.setattr(registry, "_wait_until_ready", lambda container: None)
+    conversation_id = uuid4()
+    registry.provisioning.create(conversation_id)
+
+    first, second = await asyncio.gather(
+        registry.get_or_create(conversation_id),
+        registry.get_or_create(conversation_id),
+    )
+
+    assert len(gateway.created) == 1
+    assert first.container_id == second.container_id
 
 
 def test_build_container_starts_a_stopped_sandbox(tmp_path, monkeypatch):
