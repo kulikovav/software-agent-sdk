@@ -105,7 +105,10 @@ def test_build_container_creates_a_sandbox_and_records_its_url(tmp_path, monkeyp
     assert len(create["name"]) <= 19
     assert create["labels"]["openhands.conversation"] == conversation_id.hex
     assert create["expose_port"] == 8000
-    assert create["command"][:2] == ["openhands-agent-server", "--host"]
+    # The image's frozen ``openhands-agent-server`` binary embeds upstream code,
+    # so it cannot serve a route this fork installs beside it. Start the module.
+    assert create["command"][:4] == ["python", "-m", "openhands.agent_server", "--host"]
+    assert create["command"][-2:] == ["--port", "8000"]
     assert create["environment"]["HOME"] == "/sandbox"
     assert create["environment"]["OH_CONVERSATIONS_PATH"] == "/sandbox/conversations"
     assert (
