@@ -61,6 +61,11 @@ class RuntimeProvisioningStore:
     def manifest_path(self, conversation_id: UUID) -> Path:
         return self.control_root / f"{conversation_id.hex}.json"
 
+    def policy_state_path(self, conversation_id: UUID) -> Path:
+        # Beside the manifest: the policy-watch cursor survives a restart so
+        # decisions are never posted twice, and dies with the conversation.
+        return self.control_root / f"{conversation_id.hex}.policy.json"
+
     def runtime_dir(self, conversation_id: UUID) -> Path:
         return self.direct_child(self.data_root, conversation_id.hex)
 

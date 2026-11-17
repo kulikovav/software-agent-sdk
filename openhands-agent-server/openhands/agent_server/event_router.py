@@ -59,7 +59,7 @@ from openhands.sdk.errors import (
     Unavailable,
     Unprocessable,
 )
-from openhands.sdk.event import Event, ReactionEvent
+from openhands.sdk.event import Event, PolicyEvent, ReactionEvent
 from openhands.sdk.event.ask_user import AskUserAnswerEvent
 
 
@@ -432,6 +432,42 @@ async def _run_gateway_message(
         "final_response": await event_service.get_agent_final_response(),
         "usage": usage.model_dump(mode="json") if usage is not None else None,
     }
+
+
+@event_write_router.post(
+    "/_policy",
+    responses={422: {"description": "Payload is not a policy event"}},
+    include_in_schema=False,
+)
+async def append_policy_event(
+    http_request: Request,
+    event_service: EventService = Depends(get_event_service),
+) -> Success:
+    """Deliver one governance decision from the runtime policy watch.
+
+    Served by the conversation's own agent server only: the runtime-owner
+    server (the outer proxy) refuses it, so its catalog copy cannot gain
+    events written outside the conversation's own state. Session-key auth
+    applies here as on every write route.
+    """
+    from openhands.agent_server.docker_runtime.registry import (
+        DockerConversationRegistry,
+    )
+
+    registry = getattr(http_request.app.state, "conversation_registry", None)
+    if isinstance(registry, DockerConversationRegistry):
+        raise HTTPException(404, "The runtime owner has no policy-event surface")
+    try:
+        event = Event.model_validate(await http_request.json())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not isinstance(event, PolicyEvent):
+        raise HTTPException(422, "Only policy events are accepted")
+    try:
+        await event_service.append_policy_event(event)
+    except ValueError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return Success()
 
 
 @event_write_router.post(

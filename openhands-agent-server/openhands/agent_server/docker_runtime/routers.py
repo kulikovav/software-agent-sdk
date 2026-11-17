@@ -23,6 +23,10 @@ from openhands.agent_server.dependencies import (
     get_conversation_service,
 )
 from openhands.agent_server.docker_runtime.mediation import materialize_secrets
+from openhands.agent_server.docker_runtime.openshell.events import (
+    governed_hook_config,
+    governed_launch_additions,
+)
 from openhands.agent_server.docker_runtime.proxy import (
     bridge_websocket,
     proxy_http,
@@ -432,6 +436,18 @@ async def _prepare_forward(
     )
     if registry.governed:
         _refuse_model_key(start, source)
+    if registry.governed and not existing:
+        # Server-side governance injection: the standing rules ride the launch
+        # additions and the notices hook rides the hook config, both already
+        # existing wire fields, so the start schema stays untouched.
+        start = start.model_copy(
+            update={
+                "hook_config": governed_hook_config(start.hook_config),
+                "agent_launch_additions": governed_launch_additions(
+                    start.agent_launch_additions
+                ),
+            }
+        )
 
     def payload(cipher: Cipher) -> dict[str, Any]:
         return forward_to_runtime(
@@ -537,6 +553,7 @@ async def delete_conversation(
         await asyncio.to_thread(safe_rmtree, runtime_dir)
         await asyncio.to_thread(safe_rmtree, registry.conversation_dir(conversation_id))
         registry.provisioning.manifest_path(conversation_id).unlink(missing_ok=True)
+        registry.provisioning.policy_state_path(conversation_id).unlink(missing_ok=True)
         registry.archived_marker(conversation_id).unlink(missing_ok=True)
         await conversation_service.refresh_persisted_conversation(conversation_id)
     finally:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 import grpc
@@ -11,6 +13,7 @@ from openshell._proto import openshell_pb2 as pb
 
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
 from openhands.agent_server.docker_runtime.openshell.client import OpenShellGateway
+from openhands.agent_server.docker_runtime.openshell.events import PolicyEventWatcher
 from openhands.agent_server.docker_runtime.provisioning import RuntimeIdentity
 from openhands.agent_server.docker_runtime.registry import (
     OBSERVABILITY_ENV_VARS,
@@ -30,6 +33,9 @@ _SANDBOX_HOME = "/sandbox"
 _SANDBOX_CONVERSATIONS = f"{_SANDBOX_HOME}/conversations"
 _SANDBOX_PERSISTENCE = f"{_SANDBOX_HOME}/.openhands"
 _AGENT_PORT = 8000
+_POLICY_WATCH_INTERVAL_SECONDS = float(
+    os.environ.get("OH_POLICY_WATCH_INTERVAL_SECONDS", "5")
+)
 
 
 @dataclass(slots=True)
@@ -83,12 +89,56 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             cluster=config.openshell_cluster,
             service_port=config.openshell_service_port,
         )
+        self._policy_watcher = PolicyEventWatcher(
+            self.gateway,
+            self,
+            interval=_POLICY_WATCH_INTERVAL_SECONDS,
+        )
+
+    async def start(self) -> None:
+        await super().start()
+        watcher = self._policy_watcher
+        if watcher is not None:
+            watcher.start()
 
     async def shutdown(self) -> None:
         try:
-            await super().shutdown()
+            watcher, self._policy_watcher = self._policy_watcher, None
+            if watcher is not None:
+                await watcher.stop()
         finally:
-            self.gateway.close()
+            try:
+                await super().shutdown()
+            finally:
+                self.gateway.close()
+
+    def live_governed_conversations(self) -> list[tuple[UUID, OpenShellContainer]]:
+        """Conversations with a container handle the watcher can reach."""
+        return [
+            (conversation_id, container)
+            for conversation_id, container in list(self._containers.items())
+            if isinstance(container, OpenShellContainer)
+        ]
+
+    def load_policy_state(self, conversation_id: UUID) -> dict[str, Any] | None:
+        path = self.provisioning.policy_state_path(conversation_id)
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return None
+
+    def save_policy_state(self, conversation_id: UUID, state: dict[str, Any]) -> None:
+        path = self.provisioning.policy_state_path(conversation_id)
+        temporary = path.with_name(f".{path.name}.tmp")
+        try:
+            temporary.write_text(json.dumps(state), encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+            logger.warning(
+                "Could not persist the policy state of conversation %s",
+                conversation_id,
+            )
 
     def sandbox_name(self, conversation_id: UUID) -> str:
         # The gateway caps a sandbox name at 19 characters, so the name keeps
