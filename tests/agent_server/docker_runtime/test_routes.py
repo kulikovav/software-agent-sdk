@@ -933,6 +933,23 @@ def test_governed_start_refuses_a_worktree(tmp_path, monkeypatch):
     assert "sandbox workspace" in response.json()["detail"]
 
 
+def test_governed_runtime_credentials_are_not_served(tmp_path, monkeypatch):
+    app = _governed_app(tmp_path, monkeypatch)
+    conversation_id = uuid4()
+
+    with TestClient(app) as client:
+        registry = app.state.conversation_registry
+        registry.provisioning.create(conversation_id)
+        record = registry.conversation_dir(conversation_id)
+        record.mkdir(parents=True, exist_ok=True)
+        (record / "meta.json").write_text("{}", encoding="utf-8")
+        response = client.post(
+            f"/api/conversations/{conversation_id}/runtime/credentials"
+        )
+
+    assert response.status_code == 404
+
+
 def test_governed_workspace_maps_the_docker_root_to_the_sandbox(tmp_path):
     registry = _governed_registry(tmp_path)
 
