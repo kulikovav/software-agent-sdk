@@ -103,6 +103,10 @@ class ConversationContainer:
         )
         return result.returncode == 0 and result.stdout.strip() == "true"
 
+    def startup_failed(self) -> bool:
+        """True when the runtime cannot still become healthy."""
+        return not self.is_running()
+
 
 @dataclass(slots=True)
 class ContainerLease:
@@ -818,7 +822,7 @@ class DockerConversationRegistry(ConversationRegistry):
                         return
             except (URLError, TimeoutError, ConnectionError):
                 pass
-            if not container.is_running():
+            if container.startup_failed():
                 raise RuntimeError("Conversation container stopped during startup")
             time.sleep(1)
         raise RuntimeError("Conversation container failed to become healthy in time")
