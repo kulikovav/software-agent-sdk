@@ -15,6 +15,7 @@ from starlette.routing import Match
 
 from openhands.agent_server.api import add_domain_error_handler, create_app
 from openhands.agent_server.config import Config
+from openhands.agent_server.conversation_registry import ConversationRegistry
 from openhands.agent_server.docker_runtime import routers
 from openhands.agent_server.docker_runtime.provisioning import RuntimeProvisioningStore
 from openhands.agent_server.docker_runtime.registry import (
@@ -31,6 +32,7 @@ from openhands.agent_server.models import UpdateSecretsRequest
 from openhands.agent_server.persistence import PersistedSettings, ServerStores
 from openhands.agent_server.server_context import server_context_of
 from openhands.sdk.conversation.request import ConversationContainerOptions
+from openhands.sdk.errors import Unavailable
 from openhands.sdk.git.utils import run_git_command
 from openhands.sdk.profiles.agent_profile import LaunchedAgentProfile
 from openhands.sdk.secret import LookupSecret
@@ -936,3 +938,16 @@ def test_features_follow_the_host_switch_before_reaching_the_runtime(
     else:
         assert response.status_code == 409
         assert forwarded == []
+
+
+def test_a_host_local_registry_cannot_serve_container_routes(tmp_path):
+    config = Config(
+        conversation_runtime="local",
+        conversations_path=tmp_path / "conversations",
+        workspace_path=tmp_path / "workspaces",
+        secret_key=SecretStr("outer-key"),
+    )
+    registry = ConversationRegistry(config, ServerStores.from_config(config))
+
+    with pytest.raises(Unavailable):
+        routers.get_registry(registry)
