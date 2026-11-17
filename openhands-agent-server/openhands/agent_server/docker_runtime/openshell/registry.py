@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import os
-import ssl
-import time
 from dataclasses import dataclass
-from urllib.error import URLError
-from urllib.request import urlopen
 from uuid import UUID
 
+import grpc
 from openshell._proto import openshell_pb2 as pb
 
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
@@ -52,11 +49,10 @@ class OpenShellContainer(ConversationContainer):
 
 
 class OpenShellConversationRegistry(DockerConversationRegistry):
-    """Provision one sandbox per conversation through the OpenShell gateway.
+    """Provision a sandbox per conversation, then proxy to its agent server.
 
-    The gateway publishes the agent server as a loopback HTTP service on its
-    own TLS listener, so the proxy target is the service URL plus the gateway
-    CA. Conversation state lives under ``/sandbox`` inside the sandbox.
+    The published service URL needs the gateway CA, and conversation state
+    lives under ``/sandbox``.
     """
 
     inner_workspace_root = _SANDBOX_HOME
@@ -87,10 +83,14 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
 
     def _build_container(self, conversation_id: UUID) -> ConversationContainer:
         identity = self.provisioning.load(conversation_id)
-        sandbox = self.gateway.find(conversation_id.hex)
+        name = self.sandbox_name(conversation_id)
+        created = False
+        sandbox = self.gateway.get(name)
+        if sandbox is None:
+            sandbox = self.gateway.find(f"{_CONVERSATION_LABEL}={conversation_id.hex}")
         if sandbox is None:
             sandbox = self.gateway.create(
-                name=self.sandbox_name(conversation_id),
+                name=name,
                 image=self.config.conversation_image,
                 command=[
                     "openhands-agent-server",
@@ -107,20 +107,38 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
                 provider=self.config.openshell_provider,
                 expose_port=_AGENT_PORT,
             )
-        url = sandbox.service_urls.get("")
-        if not url:
-            raise RuntimeError("OpenShell did not publish a service URL")
-        container = OpenShellContainer(
-            host=url.rstrip("/"),
-            api_key=identity.api_key.get_secret_value(),
-            container_id=sandbox.name,
-            ca_bundle=self.config.openshell_tls_ca,
-            gateway=self.gateway,
-        )
+            created = True
+        elif sandbox.phase != pb.SANDBOX_PHASE_READY:
+            sandbox = self.gateway.start(name)
         try:
+            # The empty key is the unnamed service exposure.
+            url = identity.service_url or sandbox.service_urls.get("")
+            if not url:
+                raise RuntimeError(
+                    "Sandbox has no recorded service URL; "
+                    "delete the runtime to recreate it"
+                )
+            container = OpenShellContainer(
+                host=self.gateway.service_url(url),
+                api_key=identity.api_key.get_secret_value(),
+                container_id=name,
+                ca_bundle=self.config.openshell_tls_ca,
+                gateway=self.gateway,
+            )
+            if created:
+                self.provisioning.save(
+                    identity.model_copy(update={"service_url": container.host})
+                )
             self._wait_until_ready(container)
-        except BaseException:
-            self.gateway.delete(container.container_id)
+        except grpc.RpcError:
+            # A gateway restart is not a failed start; keep the sandbox.
+            raise
+        except Exception:
+            if created:
+                try:
+                    self.gateway.delete(name)
+                except Exception:
+                    logger.exception("Could not delete failed sandbox %s", name)
             raise
         return container
 
@@ -144,23 +162,19 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
                 environment[name] = value
         return environment
 
-    def _wait_until_ready(self, container: ConversationContainer) -> None:
-        deadline = time.monotonic() + self.config.conversation_container_startup_timeout
-        context = (
-            ssl.create_default_context(cafile=container.ca_bundle)
-            if container.ca_bundle
-            else None
+    def delete_runtime(self, conversation_id: UUID) -> None:
+        self.gateway.delete(self.sandbox_name(conversation_id))
+
+    def copy_conversation_record(self, conversation_id: UUID) -> None:
+        """Copy the inner conversation record into the outer catalog."""
+        text = self.gateway.read_file(
+            self.sandbox_name(conversation_id),
+            f"{_SANDBOX_CONVERSATIONS}/{conversation_id.hex}/meta.json",
         )
-        while time.monotonic() < deadline:
-            try:
-                with urlopen(
-                    container.host + "/health", timeout=1, context=context
-                ) as response:
-                    if 200 <= response.status < 300:
-                        return
-            except (URLError, TimeoutError, ConnectionError):
-                pass
-            if not container.is_running():
-                raise RuntimeError("Conversation sandbox stopped during startup")
-            time.sleep(1)
-        raise RuntimeError("Conversation container failed to become healthy in time")
+        if text is None:
+            return
+        target = self.conversation_dir(conversation_id) / "meta.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.tmp")
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, target)

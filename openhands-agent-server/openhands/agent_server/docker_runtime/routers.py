@@ -22,10 +22,6 @@ from openhands.agent_server.dependencies import (
     get_conversation_registry,
     get_conversation_service,
 )
-from openhands.agent_server.docker_runtime.driver import (
-    ConversationDriver,
-    is_conversation_driver,
-)
 from openhands.agent_server.docker_runtime.mediation import materialize_secrets
 from openhands.agent_server.docker_runtime.proxy import (
     bridge_websocket,
@@ -34,6 +30,7 @@ from openhands.agent_server.docker_runtime.proxy import (
 )
 from openhands.agent_server.docker_runtime.registry import (
     ConversationContainer,
+    DockerConversationRegistry,
     RuntimeArchivedError,
 )
 from openhands.agent_server.event_router import require_feature_enabled
@@ -78,15 +75,14 @@ from openhands.sdk.workspace import LocalWorkspace
 logger = get_logger(__name__)
 
 
-def get_registry(registry: ConversationRegistry) -> ConversationDriver:
-    if not is_conversation_driver(registry):
-        raise Unavailable("Docker conversation runtime is unavailable")
-    return registry
+def get_registry(registry: ConversationRegistry) -> DockerConversationRegistry:
+    if not isinstance(registry, DockerConversationRegistry):
+        raise Unavailable("Container conversation runtime is unavailable")
     return registry
 
 
 async def _container(
-    registry: ConversationDriver, conversation_id: UUID
+    registry: DockerConversationRegistry, conversation_id: UUID
 ) -> ConversationContainer:
     if not registry.provisioning.manifest_path(conversation_id).is_file():
         raise NotFound("Conversation not found")
@@ -107,7 +103,7 @@ def _upstream_path(request: Request, path: str) -> str:
 
 
 async def _proxy_with_session(
-    registry: ConversationDriver,
+    registry: DockerConversationRegistry,
     conversation_id: UUID,
     container: ConversationContainer,
     request: Request,
@@ -184,7 +180,7 @@ _DEFAULT_WORKSPACE_ALIASES = frozenset({"/workspace"})
 
 
 def _resolve_workspace(
-    registry: ConversationDriver,
+    registry: DockerConversationRegistry,
     worktree: object,
     workspace: dict[str, Any] | None,
 ) -> tuple[str, Path | None]:
@@ -225,14 +221,14 @@ async def start_conversation(
 
 async def start_docker_conversation(
     body: dict[str, Any],
-    registry: ConversationDriver,
+    registry: DockerConversationRegistry,
     *,
     include_skills: bool = False,
 ) -> tuple[int, Any, UUID]:
     """Start a Docker conversation through the same path as the REST route."""
     body = body.copy()
-    if body.pop("conversation_runtime", None) not in (None, "docker"):
-        raise Unprocessable("This server only runs docker conversations")
+    if body.pop("conversation_runtime", None) not in (None, "docker", "openshell"):
+        raise Unprocessable("Unsupported conversation runtime")
 
     workspace = body.get("workspace")
     if workspace is not None and (
@@ -324,11 +320,15 @@ async def start_docker_conversation(
         if not existing:
             await registry.stop(conversation_id)
         content = {"detail": "Conversation runtime rejected the request"}
+    else:
+        # The inner server wrote its conversation record inside the runtime;
+        # the outer catalog reads that record from the host.
+        await asyncio.to_thread(registry.copy_conversation_record, conversation_id)
     return response.status_code, content, conversation_id
 
 
 async def _prepare_forward(
-    body: dict[str, Any], registry: ConversationDriver, *, existing: bool
+    body: dict[str, Any], registry: DockerConversationRegistry, *, existing: bool
 ) -> tuple[
     Callable[[Cipher], dict[str, Any]],
     LaunchedAgentProfile | None,
@@ -453,6 +453,7 @@ async def delete_conversation(
     # partially deleted state.
     try:
         await registry.stop(conversation_id)
+        await asyncio.to_thread(registry.delete_runtime, conversation_id)
         try:
             await asyncio.to_thread(registry.cleanup_worktree, conversation_id)
         except (OSError, subprocess.SubprocessError):
@@ -603,7 +604,7 @@ async def _proxy_socket(
     if not await _accept_authenticated_websocket(websocket, session_api_key, config):
         return
     registry = websocket.app.state.conversation_registry
-    if not is_conversation_driver(registry):
+    if not isinstance(registry, DockerConversationRegistry):
         await websocket.close(code=1011)
         return
     try:

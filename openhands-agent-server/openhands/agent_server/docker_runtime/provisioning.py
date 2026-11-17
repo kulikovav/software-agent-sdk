@@ -32,6 +32,10 @@ class RuntimeIdentity(BaseModel):
     worktree_git_common_dir_path: Path | None = None
     launched_agent_profile: LaunchedAgentProfile | None = None
     container: ConversationContainerOptions | None = None
+    # The gateway publishes the agent server at this URL. Only a create
+    # response carries it, so the driver records it here and reuses it when it
+    # adopts the sandbox after a restart.
+    service_url: str | None = None
 
     @property
     def cipher(self) -> Cipher:

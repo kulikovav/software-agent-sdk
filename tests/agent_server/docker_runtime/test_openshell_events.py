@@ -33,7 +33,7 @@ def test_parse_network_connect_denial():
 
 def test_parse_http_denial_with_policy_and_rule():
     denial = parse_denial(
-        'HTTP:POST DENIED  POST https://litellm.example/v1/other '
+        "HTTP:POST DENIED  POST https://litellm.example/v1/other "
         '[policy:_provider_litellm engine:l7 rule "POST /other"]'
     )
 
@@ -43,6 +43,17 @@ def test_parse_http_denial_with_policy_and_rule():
         reason="_provider_litellm",
         rule="POST /other",
     )
+
+
+def test_parse_a_quoted_rule_that_contains_a_colon():
+    denial = parse_denial(
+        "HTTP:POST DENIED  POST https://litellm.example/v1/other "
+        '[policy:_provider_litellm rule "POST /a:b"]'
+    )
+
+    assert denial is not None
+    assert denial.reason == "_provider_litellm"
+    assert denial.rule == "POST /a:b"
 
 
 def test_parse_ignores_an_allowed_line():
@@ -69,9 +80,9 @@ def test_governance_context_states_default_deny_and_one_retry():
 
 def test_denied_event_carries_the_decision():
     denial = parse_denial(
-        "HTTP:GET DENIED  GET https://example/v1/x "
-        "[policy:canvas_ingress engine:l7]"
+        "HTTP:GET DENIED  GET https://example/v1/x [policy:canvas_ingress engine:l7]"
     )
+    assert denial is not None
 
     event = denied_event(denial)
 

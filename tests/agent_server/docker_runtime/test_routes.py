@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from starlette.requests import Request
@@ -33,7 +33,7 @@ from openhands.agent_server.models import UpdateSecretsRequest
 from openhands.agent_server.persistence import PersistedSettings, ServerStores
 from openhands.agent_server.server_context import server_context_of
 from openhands.sdk.conversation.request import ConversationContainerOptions
-from openhands.sdk.errors import Unavailable
+from openhands.sdk.errors import Unavailable, Unprocessable
 from openhands.sdk.git.utils import run_git_command
 from openhands.sdk.profiles.agent_profile import LaunchedAgentProfile
 from openhands.sdk.secret import LookupSecret
@@ -950,23 +950,25 @@ def test_a_host_local_registry_cannot_serve_container_routes(tmp_path):
     )
     registry = ConversationRegistry(config, ServerStores.from_config(config))
 
-    stores = ServerStores.from_config(config)
-    assert not routers.is_conversation_driver(ConversationRegistry(config, stores))
-    assert routers.is_conversation_driver(DockerConversationRegistry(config, stores))
+    with pytest.raises(Unavailable):
+        routers.get_registry(registry)
 
 
-def _governed_app(tmp_path, monkeypatch):
-    from openhands.agent_server import api as api_module, server_context
+def _governed_registry(tmp_path):
+    from openhands.agent_server.docker_runtime.openshell.client import OpenShellGateway
     from openhands.agent_server.docker_runtime.openshell.registry import (
         OpenShellConversationRegistry,
     )
 
-    class FakeGateway:
-        def find(self, _conversation_hex):
-            raise AssertionError("a refused start must not touch the gateway")
+    class FakeGateway(OpenShellGateway):
+        def __init__(self):
+            self.service_port = None
 
         def create(self, **_kwargs):
-            raise AssertionError("a refused start must not touch the gateway")
+            raise AssertionError("a refused start must not create a sandbox")
+
+        def find(self, selector):
+            return None
 
         def close(self):
             pass
@@ -977,7 +979,13 @@ def _governed_app(tmp_path, monkeypatch):
         workspace_path=tmp_path / "governed-workspaces",
         secret_key=SecretStr("outer-key"),
     )
-    registry = OpenShellConversationRegistry(config, gateway=FakeGateway())
+    return OpenShellConversationRegistry(config, gateway=FakeGateway())
+
+
+def _governed_app(tmp_path, monkeypatch):
+    from openhands.agent_server import api as api_module, server_context
+
+    registry = _governed_registry(tmp_path)
     monkeypatch.setattr(
         server_context,
         "create_conversation_registry",
@@ -1011,8 +1019,8 @@ def test_governed_start_refuses_a_worktree(tmp_path, monkeypatch):
     assert "sandbox workspace" in response.json()["detail"]
 
 
-def test_governed_workspace_maps_the_docker_root_to_the_sandbox():
-    registry = SimpleNamespace(governed=True, inner_workspace_root="/sandbox")
+def test_governed_workspace_maps_the_docker_root_to_the_sandbox(tmp_path):
+    registry = _governed_registry(tmp_path)
 
     working_dir, host_workspace = routers._resolve_workspace(
         registry, None, {"working_dir": "/workspace"}
@@ -1022,15 +1030,21 @@ def test_governed_workspace_maps_the_docker_root_to_the_sandbox():
     assert host_workspace is None
 
 
-def test_governed_workspace_refuses_another_host_path():
-    registry = SimpleNamespace(governed=True, inner_workspace_root="/sandbox")
+def test_governed_workspace_refuses_another_host_path(tmp_path):
+    registry = _governed_registry(tmp_path)
 
-    with pytest.raises(HTTPException, match="sandbox workspace"):
+    with pytest.raises(Unprocessable, match="sandbox workspace"):
         routers._resolve_workspace(registry, None, {"working_dir": "/tmp/project"})
 
 
-def test_docker_workspace_keeps_a_host_path():
-    registry = SimpleNamespace(governed=False, inner_workspace_root="/workspace")
+def test_docker_workspace_keeps_a_host_path(tmp_path):
+    config = Config(
+        conversation_runtime="docker",
+        conversations_path=tmp_path / "conversations",
+        workspace_path=tmp_path / "workspaces",
+        secret_key=SecretStr("outer-key"),
+    )
+    registry = DockerConversationRegistry(config, ServerStores.from_config(config))
 
     working_dir, host_workspace = routers._resolve_workspace(
         registry, None, {"working_dir": "/tmp/project"}
