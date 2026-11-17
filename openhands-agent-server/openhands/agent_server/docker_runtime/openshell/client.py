@@ -2,18 +2,29 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import grpc
 from openshell import SandboxClient, SandboxRef, ServiceExposure
-from openshell._proto import openshell_pb2 as pb
+from openshell._proto import datamodel_pb2, openshell_pb2 as pb
 
+from openhands.agent_server.docker_runtime.openshell.events import (
+    NOTICES_DIR,
+    NOTICES_PATH,
+)
 from openhands.sdk.logger import get_logger
 
 
 logger = get_logger(__name__)
+
+# The 0.1.7 SDK pins no wrapper for the policy and log surfaces, so the
+# governance loop calls the pinned gRPC stub directly.
+_LOG_LINES = 500
+_POLICY_TIMEOUT_SECONDS = 30.0
 
 
 class OpenShellGateway:
@@ -151,6 +162,76 @@ class OpenShellGateway:
             )
             return None
         return result.stdout
+
+    def _policy_scope(self) -> datamodel_pb2.WorkspaceSelector:
+        return datamodel_pb2.WorkspaceSelector(workspace=self.workspace)
+
+    def logs(
+        self,
+        name: str,
+        since_epoch: float | None = None,
+        lines: int = _LOG_LINES,
+    ) -> list[pb.SandboxLogLine]:
+        """Recent sandbox log lines, newer than ``since_epoch`` when given."""
+        request = pb.GetSandboxLogsRequest(
+            workspace_scope=self._policy_scope(),
+            sandbox=name,
+            lines=lines,
+        )
+        if since_epoch is not None:
+            request.since_time.FromMilliseconds(int(since_epoch * 1000))
+        response = self._client._stub.GetSandboxLogs(
+            request, timeout=_POLICY_TIMEOUT_SECONDS
+        )
+        return list(response.logs)
+
+    def draft_chunks(self, name: str) -> list[Any]:
+        """The gateway's drafted rule proposals for one sandbox."""
+        response = self._client._stub.GetDraftPolicy(
+            pb.GetDraftPolicyRequest(
+                workspace_scope=self._policy_scope(),
+                sandbox=name,
+            ),
+            timeout=_POLICY_TIMEOUT_SECONDS,
+        )
+        return list(response.chunks)
+
+    def commit_approved_chunk(self, name: str, chunk_id: str, review_token: str) -> int:
+        """Commit one human-approved widening request at a turn boundary.
+
+        Only a chunk the operator already decided may pass here: the driver
+        never approves a pending or rejected proposal, and it never batches
+        chunks, so no automated surface performs a bulk approval.
+        """
+        response = self._client._stub.ApproveDraftChunk(
+            pb.ApproveDraftChunkRequest(
+                workspace_scope=self._policy_scope(),
+                sandbox=name,
+                chunk_id=chunk_id,
+                review_token=review_token,
+                request_id=str(uuid.uuid4()),
+            ),
+            timeout=_POLICY_TIMEOUT_SECONDS,
+        )
+        return int(response.policy_version)
+
+    def append_notices(self, name: str, text: str) -> None:
+        """Append governance notices to the sandbox file the hook reads.
+
+        The text travels on stdin, so no shell quoting is involved.
+        """
+        result = self._client.exec(
+            name,
+            ["sh", "-c", f"mkdir -p {NOTICES_DIR} && cat >> {NOTICES_PATH}"],
+            workspace=self.workspace,
+            stdin=text.encode(),
+        )
+        if result.exit_code != 0:
+            logger.warning(
+                "Could not append governance notices in sandbox %s: exit %s",
+                name,
+                result.exit_code,
+            )
 
     def _require_tls(self, url: str) -> None:
         # The proxy forwards the inner session key to this URL.

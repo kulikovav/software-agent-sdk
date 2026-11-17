@@ -373,3 +373,54 @@ def test_delete_runtime_deletes_the_sandbox(tmp_path):
     registry.delete_runtime(conversation_id)
 
     assert gateway.deleted == [registry.sandbox_name(conversation_id)]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_the_policy_watcher(tmp_path):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+
+    watcher = registry._policy_watcher
+    assert watcher is not None
+    watcher.start()
+    await registry.shutdown()
+
+    assert registry._policy_watcher is None
+    assert gateway.closed
+
+
+def test_live_governed_conversations_lists_its_containers(tmp_path):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    container = OpenShellContainer(
+        host="https://sandbox:17670",
+        api_key="key",
+        container_id="oh-x",
+        gateway=gateway,
+    )
+    conversation_id = uuid4()
+    registry._containers[conversation_id] = container
+
+    live = registry.live_governed_conversations()
+
+    assert live == [(conversation_id, container)]
+
+
+def test_policy_state_is_persisted_for_a_restart(tmp_path):
+    registry = make_registry(tmp_path, FakeGateway())
+    conversation_id = uuid4()
+
+    assert registry.load_policy_state(conversation_id) is None
+
+    registry.save_policy_state(
+        conversation_id, {"chunk_status": {"chunk-1": "approved"}}
+    )
+
+    # Beside the manifest: the same control-file lifecycle as the identity.
+    assert (
+        registry.provisioning.policy_state_path(conversation_id)
+        == registry.provisioning.control_root / f"{conversation_id.hex}.policy.json"
+    )
+    assert registry.load_policy_state(conversation_id) == {
+        "chunk_status": {"chunk-1": "approved"}
+    }

@@ -75,6 +75,7 @@ from openhands.sdk.credential import (
 from openhands.sdk.event import (
     AgentErrorEvent,
     ObservationBaseEvent,
+    PolicyEvent,
     StreamingDeltaEvent,
 )
 from openhands.sdk.event.conversation_error import ConversationErrorEvent
@@ -990,6 +991,24 @@ class EventService:
                         and not active_acp_prompt_has_latest_message
                     ):
                         self._rerun_requested = True
+
+    async def append_policy_event(self, event: PolicyEvent) -> None:
+        """Persist and publish one governance decision from the runtime watch.
+
+        The governance context in the system prompt carries the standing
+        rules, so the event stays out of the agent's LLM context; this only
+        makes the decision visible in the log, the UI, and the sockets.
+        """
+        if not self._conversation:
+            raise ValueError("inactive_service")
+        loop = asyncio.get_running_loop()
+        conversation = self._conversation
+
+        def _persist() -> None:
+            with conversation._state:
+                conversation._on_event(event)
+
+        await loop.run_in_executor(None, _persist)
 
     def _mark_running_acp_prompt_superseded_sync(self) -> tuple[bool, bool]:
         """Mark the currently running ACP prompt superseded if needed.
