@@ -395,6 +395,10 @@ async def runtime_credentials(
 ) -> JSONResponse:
     """Return the key for an authenticated client attached to this runtime."""
     registry = get_registry(conversation_registry)
+    # A governed conversation's key lives only in the outer proxy. Serving it
+    # here would leak the key; answer 404 like a missing conversation instead.
+    if registry.governed:
+        raise NotFound("Conversation not found")
     if not registry.conversation_dir(conversation_id).joinpath("meta.json").is_file():
         raise NotFound("Conversation not found")
     identity = await run_store(registry.provisioning.load, conversation_id)
