@@ -862,3 +862,57 @@ def test_host_local_registry_is_not_a_conversation_driver(tmp_path):
 
     assert not routers.is_conversation_driver(ConversationRegistry(config))
     assert routers.is_conversation_driver(DockerConversationRegistry(config))
+
+
+def _governed_app(tmp_path, monkeypatch):
+    from openhands.agent_server import api as api_module
+    from openhands.agent_server.docker_runtime.openshell.registry import (
+        OpenShellConversationRegistry,
+    )
+
+    class FakeGateway:
+        def find(self, _conversation_hex):
+            raise AssertionError("a refused start must not touch the gateway")
+
+        def create(self, **_kwargs):
+            raise AssertionError("a refused start must not touch the gateway")
+
+        def close(self):
+            pass
+
+    config = Config(
+        conversation_runtime="openshell",
+        conversations_path=tmp_path / "governed-conversations",
+        workspace_path=tmp_path / "governed-workspaces",
+        secret_key=SecretStr("outer-key"),
+    )
+    registry = OpenShellConversationRegistry(config, gateway=FakeGateway())
+    monkeypatch.setattr(
+        api_module, "create_conversation_registry", lambda _config: registry
+    )
+    return api_module.create_app(config)
+
+
+def test_governed_start_refuses_a_host_workspace(tmp_path, monkeypatch):
+    app = _governed_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/conversations",
+            json={
+                "workspace": {"kind": "LocalWorkspace", "working_dir": "/tmp/project"}
+            },
+        )
+
+    assert response.status_code == 422
+    assert "sandbox workspace" in response.json()["detail"]
+
+
+def test_governed_start_refuses_a_worktree(tmp_path, monkeypatch):
+    app = _governed_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post("/api/conversations", json={"worktree": True})
+
+    assert response.status_code == 422
+    assert "sandbox workspace" in response.json()["detail"]
