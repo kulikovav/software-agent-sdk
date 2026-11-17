@@ -141,7 +141,7 @@ def test_root_conversation_proxy_preserves_canonical_path(tmp_path, monkeypatch)
     captured = {}
 
     async def container(*_args):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def proxy(*_args, **kwargs):
         captured.update(kwargs)
@@ -188,7 +188,9 @@ def test_worktree_start_forwards_only_mounted_host_paths(
         registry,
         "get_or_create",
         AsyncMock(
-            return_value=SimpleNamespace(host="http://inner", api_key="inner-key")
+            return_value=SimpleNamespace(
+                host="http://inner", api_key="inner-key", ca_bundle=None
+            )
         ),
     )
     captured = {}
@@ -653,7 +655,7 @@ async def test_secret_updates_are_materialized_and_profile_scoped(
     captured = {}
 
     async def container(*_args):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def proxy(*_args, **kwargs):
         captured.update(kwargs)
@@ -747,7 +749,7 @@ def test_a_rejected_start_stops_only_a_container_it_created(
     stopped = []
 
     async def get_or_create(_conversation_id):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def stop(stopped_id):
         stopped.append(stopped_id)
@@ -780,7 +782,7 @@ def test_a_successful_start_returns_the_inner_status_and_releases_its_lease(
     conversation_id = uuid4()
 
     async def get_or_create(_conversation_id):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def post(self, url, **kwargs):
         return httpx.Response(
@@ -834,7 +836,7 @@ def test_a_retried_start_records_the_latest_container_options(tmp_path, monkeypa
     conversation_id = uuid4()
 
     async def get_or_create(_conversation_id):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def post(self, url, **kwargs):
         return httpx.Response(500, request=httpx.Request("POST", url))
@@ -1143,3 +1145,44 @@ def test_a_start_of_an_archived_conversation_returns_410(tmp_path, monkeypatch):
         response = client.post("/api/conversations", json=body)
 
     assert response.status_code == 410
+
+
+async def test_a_governed_start_verifies_the_gateway_ca(tmp_path, monkeypatch):
+    registry = _governed_registry(tmp_path)
+    container = SimpleNamespace(
+        host="https://default--oh-test.openshell.localhost:17670",
+        api_key="inner-key",
+        ca_bundle=str(tmp_path / "ca.crt"),
+        container_id="oh-test",
+    )
+    monkeypatch.setattr(registry, "get_or_create", AsyncMock(return_value=container))
+    monkeypatch.setattr(registry, "acquire_lease", lambda _id: lambda: None)
+    monkeypatch.setattr(registry, "copy_conversation_record", lambda _id: None)
+    monkeypatch.setattr(
+        routers,
+        "_prepare_forward",
+        AsyncMock(return_value=(lambda cipher: {}, None, None, False)),
+    )
+    seen: dict[str, object] = {}
+
+    class Client:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, _url, **_kwargs):
+            return httpx.Response(200, json={"id": "conversation"})
+
+    monkeypatch.setattr(routers.httpx, "AsyncClient", Client)
+
+    await routers.start_docker_conversation(
+        {"agent": {"kind": "Agent", "llm": {"model": "test"}}}, registry
+    )
+
+    # A published service URL is signed by the gateway CA, not by a public one.
+    assert seen["verify"] == container.ca_bundle
