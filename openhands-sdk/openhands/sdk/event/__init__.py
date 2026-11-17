@@ -19,6 +19,7 @@ from openhands.sdk.event.llm_convertible import (
     UserRejectObservation,
 )
 from openhands.sdk.event.message_edit import MessageEditEvent
+from openhands.sdk.event.policy import PolicyEvent
 from openhands.sdk.event.reaction import (
     REACTION_EMOJI,
     ReactionEmoji,
@@ -54,6 +55,7 @@ __all__ = [
     "ReactionEvent",
     "ReactionEmoji",
     "REACTION_EMOJI",
+    "PolicyEvent",
     "StreamingDeltaEvent",
     "Condensation",
     "CondensationRequest",

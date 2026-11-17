@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from openhands.sdk.event.policy import PolicyEvent
+
 
 GOVERNANCE_CONTEXT = (
     "This conversation runs inside a governed sandbox. Egress is denied by "
@@ -76,4 +78,14 @@ def parse_denial(line: str) -> PolicyDenial | None:
         destination=destination,
         reason=reason,
         rule=fields.get("rule"),
+    )
+
+
+def denied_event(denial: PolicyDenial) -> PolicyEvent:
+    """The conversation-visible event for one denial."""
+    return PolicyEvent(
+        status="denied",
+        destination=denial.destination,
+        reason=denial.reason,
+        rule=denial.rule,
     )
