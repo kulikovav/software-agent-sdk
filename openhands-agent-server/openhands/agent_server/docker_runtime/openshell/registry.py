@@ -33,6 +33,21 @@ _SANDBOX_HOME = "/sandbox"
 _SANDBOX_CONVERSATIONS = f"{_SANDBOX_HOME}/conversations"
 _SANDBOX_PERSISTENCE = f"{_SANDBOX_HOME}/.openhands"
 _AGENT_PORT = 8000
+# The agent-server image also ships a frozen ``openhands-agent-server`` binary
+# built from the upstream SDK release. That binary embeds its own copy of the
+# server, so it never sees an ``openhands-agent-server`` package installed
+# beside it; a fork's routes and fixes would stay invisible. Start the module
+# from the image's interpreter instead, which is the package the image
+# install actually holds.
+_AGENT_COMMAND = [
+    "python",
+    "-m",
+    "openhands.agent_server",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    str(_AGENT_PORT),
+]
 _POLICY_WATCH_INTERVAL_SECONDS = float(
     os.environ.get("OH_POLICY_WATCH_INTERVAL_SECONDS", "5")
 )
@@ -179,13 +194,7 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             sandbox = self.gateway.create(
                 name=name,
                 image=self.config.conversation_image,
-                command=[
-                    "openhands-agent-server",
-                    "--host",
-                    "0.0.0.0",
-                    "--port",
-                    str(_AGENT_PORT),
-                ],
+                command=list(_AGENT_COMMAND),
                 environment=self._sandbox_environment(identity),
                 labels={
                     _CONVERSATION_LABEL: conversation_id.hex,

@@ -1068,6 +1068,50 @@ class TestPolicyEventEndpoint:
 
         assert response.status_code == 422
 
+    def test_the_watch_url_names_the_route_the_app_serves(self, tmp_path):
+        """A missing append route answers 405, not 404, so guard the path.
+
+        The watcher runs in this process but posts to the conversation's own
+        server. Pin the URL it builds to a route this app defines, so a rename
+        or a dropped include fails here instead of only in a live sandbox.
+        """
+        from urllib.parse import urlsplit
+
+        from fastapi.routing import APIRoute
+        from pydantic import SecretStr
+        from starlette.routing import Match
+
+        from openhands.agent_server.api import create_app
+        from openhands.agent_server.config import Config
+        from openhands.agent_server.docker_runtime.openshell.events import (
+            policy_event_url,
+        )
+
+        app = create_app(
+            Config(
+                conversations_path=tmp_path / "conversations",
+                workspace_path=tmp_path / "workspaces",
+                secret_key=SecretStr("test-key"),
+            )
+        )
+        url = policy_event_url("http://sandbox", uuid4())
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": urlsplit(url).path,
+            "root_path": "",
+            "headers": [],
+            "query_string": b"",
+        }
+
+        matched = [
+            route
+            for route in app.routes
+            if isinstance(route, APIRoute) and route.matches(scope)[0] is Match.FULL
+        ]
+
+        assert [route.endpoint.__name__ for route in matched] == ["append_policy_event"]
+
     def test_the_runtime_owner_has_no_policy_event_surface(self, tmp_path):
         from typing import cast
 

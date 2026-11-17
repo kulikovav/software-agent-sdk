@@ -487,6 +487,10 @@ class TestPolicyEventWatcher:
         assert delivered["reason"] == "transparent_tcp_policy_denied"
         assert delivered["provenance"]["proposal"] == "chunk-1"
         assert posts[0]["headers"]["x-session-api-key"] == "inner-key"
+        assert posts[0]["url"] == (
+            f"https://sandbox:17670/api/conversations/"
+            f"{registry.conversation_id.hex}/events/_policy"
+        )
         assert registry.leases == 0
         assert registry.saved and registry.saved[0]["log_cursor"] == 10.0
 

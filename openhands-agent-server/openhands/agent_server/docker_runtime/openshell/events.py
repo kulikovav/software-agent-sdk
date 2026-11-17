@@ -474,6 +474,17 @@ class PolicyLedger:
         return any(key.endswith(suffix) for key in self.denial_posted)
 
 
+def policy_event_url(host: str, conversation_id: UUID) -> str:
+    """The append route the conversation's own server serves.
+
+    The id travels in its undashed form, as the sandbox names its conversation
+    directory. A server without this route answers 405: ``GET
+    /events/{event_id}`` matches the path as a partial route, so a missing
+    append route does not surface as a 404.
+    """
+    return f"{host}/api/conversations/{conversation_id.hex}/events/_policy"
+
+
 class PolicyEventWatcher:
     """Watch the gateway records of one governed workspace.
 
@@ -626,8 +637,7 @@ class PolicyEventWatcher:
         try:
             async with self._http_client(container) as client:
                 response = await client.post(
-                    f"{container.host}/api/conversations/{conversation_id.hex}"
-                    "/events/_policy",
+                    policy_event_url(container.host, conversation_id),
                     headers={"X-Session-API-Key": container.api_key},
                     json=event.model_dump(mode="json"),
                 )
