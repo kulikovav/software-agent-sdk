@@ -242,6 +242,25 @@ def _refuse_model_key(
             )
 
 
+def _strip_governed_mcp(source: LaunchSource) -> tuple[LaunchSource, list[str]]:
+    """Drop every MCP server a governed start would forward (R14).
+
+    Works on both launch sources: resolved agent settings (from a stored
+    profile or request ``agent_settings``) and a request-supplied agent. The
+    strip is unconditional: governance is policy, not an option.
+    """
+    if isinstance(source, ResolvedLaunch):
+        dropped = sorted(source.settings.mcp_config)
+        if not dropped:
+            return source, []
+        cleared = source.settings.model_copy(update={"mcp_config": {}})
+        return ResolvedLaunch(settings=cleared, profile=source.profile), dropped
+    dropped = sorted(source.mcp_config)
+    if not dropped:
+        return source, []
+    return source.model_copy(update={"mcp_config": {}}), dropped
+
+
 def _resolve_workspace(
     registry: DockerConversationRegistry,
     worktree: object,
@@ -436,6 +455,14 @@ async def _prepare_forward(
     )
     if registry.governed:
         _refuse_model_key(start, source)
+        if source is not None:
+            source, dropped_mcp = _strip_governed_mcp(source)
+            if dropped_mcp:
+                # R14: the operator should know what governance dropped.
+                logger.warning(
+                    "Governed conversation drops MCP servers: %s",
+                    ", ".join(dropped_mcp),
+                )
     if registry.governed and not existing:
         # Server-side governance injection: the standing rules ride the launch
         # additions and the notices hook rides the hook config, both already
