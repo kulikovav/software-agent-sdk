@@ -433,6 +433,14 @@ class Config(BaseModel):
             "model endpoint resolves without a key inside the sandbox."
         ),
     )
+    openshell_service_port: int | None = Field(
+        default=None,
+        description=(
+            "Port the gateway publishes its HTTP listener on. The SDK composes "
+            "service URLs on the gateway's internal port; set this when the "
+            "published port differs."
+        ),
+    )
     openshell_tls_ca: str | None = Field(
         default=None,
         description=(

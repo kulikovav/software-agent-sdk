@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from urllib.parse import urlsplit, urlunsplit
 
 from openshell import SandboxClient, SandboxError, SandboxRef, ServiceExposure
 from openshell._proto import openshell_pb2 as pb
@@ -20,8 +22,18 @@ class OpenShellGateway:
     ``asyncio.to_thread``.
     """
 
-    def __init__(self, workspace: str, *, cluster: str | None = None) -> None:
+    def __init__(
+        self,
+        workspace: str,
+        *,
+        cluster: str | None = None,
+        service_port: int | None = None,
+    ) -> None:
         self.workspace = workspace
+        # The SDK composes service URLs on the gateway's internal listener
+        # port. A published gateway listens elsewhere, so the driver rewrites
+        # the port when the deployment sets one.
+        self.service_port = service_port
         self._client = SandboxClient.from_active_cluster(cluster=cluster)
 
     def close(self) -> None:
@@ -53,14 +65,32 @@ class OpenShellGateway:
         )
         if provider:
             spec.providers.append(provider)
-        self._client.create(
+        created = self._client.create(
             workspace=self.workspace,
             spec=spec,
             name=name,
             labels=dict(labels),
             service_exposures=[ServiceExposure(target_port=expose_port)],
         )
-        return self._client.wait_ready(name, workspace=self.workspace)
+        ready = self._client.wait_ready(name, workspace=self.workspace)
+        # Only the create response carries the URLs; wait_ready drops them.
+        urls = dict(created.service_urls or ready.service_urls)
+        return replace(
+            ready,
+            service_urls={
+                key: self.service_url(url) for key, url in urls.items()
+            },
+        )
+
+    def service_url(self, url: str) -> str:
+        """Republish a service URL on the gateway's published port."""
+        parts = urlsplit(url)
+        if self.service_port is None or parts.port in (None, self.service_port):
+            return url.rstrip("/")
+        netloc = f"{parts.hostname or parts.netloc}:{self.service_port}"
+        return urlunsplit(
+            (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+        ).rstrip("/")
 
     def get(self, name: str) -> SandboxRef | None:
         try:
