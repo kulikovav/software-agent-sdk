@@ -71,7 +71,9 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
         self.gateway.close()
 
     def sandbox_name(self, conversation_id: UUID) -> str:
-        return f"oh-{conversation_id.hex}"
+        # The gateway caps a sandbox name at 19 characters, so the name keeps
+        # 16 hex digits; the full id lives in the conversation label.
+        return f"oh-{conversation_id.hex[:16]}"
 
     def cleanup_stale_containers(self) -> None:
         """The gateway owns sandbox cleanup; there is no host runtime to scan."""
@@ -80,9 +82,16 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
         identity = self.provisioning.load(conversation_id)
         name = self.sandbox_name(conversation_id)
         created = False
-        sandbox = self.gateway.get(name)
+        # The label carries the full conversation id, so it identifies the
+        # sandbox even when the name had to be shortened.
+        sandbox = self.gateway.find(f"{_CONVERSATION_LABEL}={conversation_id.hex}")
         if sandbox is None:
-            sandbox = self.gateway.find(f"{_CONVERSATION_LABEL}={conversation_id.hex}")
+            sandbox = self.gateway.get(name)
+            if (
+                sandbox is not None
+                and sandbox.labels.get(_CONVERSATION_LABEL) != conversation_id.hex
+            ):
+                raise RuntimeError("Sandbox name collision")
         if sandbox is None and identity.service_url:
             # The sandbox held the conversation state, so a recorded runtime
             # the gateway no longer has cannot be resumed.
@@ -121,7 +130,7 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             container = OpenShellContainer(
                 host=self.gateway.service_url(url),
                 api_key=identity.api_key.get_secret_value(),
-                container_id=name,
+                container_id=sandbox.name,
                 ca_bundle=self.config.openshell_tls_ca,
                 gateway=self.gateway,
             )
@@ -162,13 +171,21 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
                 environment[name] = value
         return environment
 
+    def _existing_sandbox_name(self, conversation_id: UUID) -> str:
+        """The sandbox that holds this conversation, or its reserved name."""
+        container = self.get(conversation_id)
+        if container is not None:
+            return container.container_id
+        sandbox = self.gateway.find(f"{_CONVERSATION_LABEL}={conversation_id.hex}")
+        return sandbox.name if sandbox is not None else self.sandbox_name(conversation_id)
+
     def delete_runtime(self, conversation_id: UUID) -> None:
-        self.gateway.delete(self.sandbox_name(conversation_id))
+        self.gateway.delete(self._existing_sandbox_name(conversation_id))
 
     def copy_conversation_record(self, conversation_id: UUID) -> None:
         """Copy the inner conversation record into the outer catalog."""
         text = self.gateway.read_file(
-            self.sandbox_name(conversation_id),
+            self._existing_sandbox_name(conversation_id),
             f"{_SANDBOX_CONVERSATIONS}/{conversation_id.hex}/meta.json",
         )
         if text is None:
