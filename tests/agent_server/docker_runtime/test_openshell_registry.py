@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
 from openhands.agent_server.docker_runtime.openshell.client import OpenShellGateway
 from openhands.agent_server.docker_runtime.openshell.registry import (
+    OpenShellContainer,
     OpenShellConversationRegistry,
 )
 from openhands.agent_server.docker_runtime.registry import RuntimeArchivedError
@@ -292,6 +293,27 @@ def test_a_vanished_sandbox_is_archived_for_resume(tmp_path):
     info = registry.runtime_info(conversation_id)
     assert info.runtime_status == ConversationRuntimeStatus.MISSING
     assert info.can_resume is False
+
+
+def test_a_provisioning_sandbox_is_not_a_failed_start(tmp_path):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    name = registry.sandbox_name(uuid4())
+    handle = OpenShellContainer(
+        host="https://sandbox:17670",
+        api_key="key",
+        container_id=name,
+        gateway=gateway,
+    )
+
+    gateway.existing = make_sandbox(name, phase=pb.SANDBOX_PHASE_PROVISIONING)
+    assert handle.startup_failed() is False
+
+    gateway.existing = make_sandbox(name, phase=pb.SANDBOX_PHASE_ERROR)
+    assert handle.startup_failed() is True
+
+    gateway.existing = None
+    assert handle.startup_failed() is True
 
 
 def test_copy_conversation_record_writes_the_outer_record(tmp_path):

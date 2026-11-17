@@ -44,6 +44,18 @@ class OpenShellContainer(ConversationContainer):
         sandbox = self.gateway.get(self.container_id)
         return sandbox is not None and sandbox.phase == pb.SANDBOX_PHASE_READY
 
+    def startup_failed(self) -> bool:
+        """A provisioning or starting sandbox is not a failed one."""
+        if self.gateway is None:
+            return True
+        sandbox = self.gateway.get(self.container_id)
+        return sandbox is None or sandbox.phase in (
+            pb.SANDBOX_PHASE_ERROR,
+            pb.SANDBOX_PHASE_STOPPED,
+            pb.SANDBOX_PHASE_COMPLETED,
+            pb.SANDBOX_PHASE_DELETING,
+        )
+
     def stop(self) -> None:
         if self.gateway is not None:
             self.gateway.stop(self.container_id)
@@ -183,7 +195,9 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
         if container is not None:
             return container.container_id
         sandbox = self.gateway.find(f"{_CONVERSATION_LABEL}={conversation_id.hex}")
-        return sandbox.name if sandbox is not None else self.sandbox_name(conversation_id)
+        return (
+            sandbox.name if sandbox is not None else self.sandbox_name(conversation_id)
+        )
 
     def delete_runtime(self, conversation_id: UUID) -> None:
         self.gateway.delete(self._existing_sandbox_name(conversation_id))
