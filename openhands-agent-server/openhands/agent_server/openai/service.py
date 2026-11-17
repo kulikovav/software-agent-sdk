@@ -608,7 +608,7 @@ async def _run_agent(
     if (
         registry is not None
         and not local_owned
-        and (config.conversation_runtime == "docker" or docker_owned)
+        and (config.conversations_run_offhost or docker_owned)
     ):
         return await _run_docker_agent(
             start_request=start_request,
@@ -617,8 +617,8 @@ async def _run_agent(
             reusable_conversation_id=reusable_conversation_id,
             registry=registry,
         )
-    if config.conversation_runtime == "docker" and registry is None:
-        raise Unavailable("Docker conversation runtime is unavailable")
+    if config.conversations_run_offhost and registry is None:
+        raise Unavailable("Container conversation runtime is unavailable")
     event_service = None
     conversation_id = reusable_conversation_id
     if reusable_conversation_id is not None:

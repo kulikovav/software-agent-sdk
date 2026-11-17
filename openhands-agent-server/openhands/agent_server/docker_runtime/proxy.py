@@ -30,7 +30,6 @@ class ProxyTarget(Protocol):
 
 
 def _ca_bundle(target: ProxyTarget) -> str | None:
-    """TLS bundle for an HTTPS target, if the driver publishes one."""
     return getattr(target, "ca_bundle", None)
 
 

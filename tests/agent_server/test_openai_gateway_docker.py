@@ -55,6 +55,37 @@ def _mock_container(monkeypatch, *, host="http://inner"):
     return mock
 
 
+async def test_an_openshell_request_runs_in_its_sandbox(monkeypatch, tmp_path):
+    config = Config(
+        conversation_runtime="openshell",
+        conversations_path=tmp_path / "conversations",
+        workspace_path=tmp_path / "workspace",
+        secret_key=SecretStr("outer-key"),
+    )
+    # A governed conversation has no manifest, so only the runtime setting can
+    # keep it off this process.
+    registry = SimpleNamespace(
+        provisioning=SimpleNamespace(manifest_path=lambda _id: tmp_path / "absent")
+    )
+    offhost = AsyncMock(return_value="offhost")
+    monkeypatch.setattr(gateway, "_run_docker_agent", offhost)
+
+    result = await gateway._run_agent(
+        start_request=StartConversationRequest(
+            agent_profile_id=uuid4(),
+            workspace=LocalWorkspace(working_dir=str(config.workspace_path)),
+        ),
+        user_content=[TextContent(text="hi")],
+        conversation_service=AsyncMock(),
+        reusable_conversation_id=uuid4(),
+        config=config,
+        registry=registry,
+    )
+
+    assert result == "offhost"
+    offhost.assert_awaited_once()
+
+
 async def _run_gateway(
     config,
     registry,

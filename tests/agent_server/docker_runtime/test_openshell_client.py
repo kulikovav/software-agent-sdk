@@ -1,3 +1,4 @@
+import grpc
 import pytest
 from openshell import SandboxRef, SandboxStatusRef
 
@@ -75,3 +76,28 @@ def test_create_refuses_a_service_url_without_tls(monkeypatch):
 
     with pytest.raises(RuntimeError, match="without TLS"):
         create(gateway)
+
+
+def test_create_adopts_a_sandbox_another_process_created(monkeypatch):
+    gateway, sdk = make_gateway(monkeypatch, 17670)
+    existing = SandboxRef(
+        id="1",
+        name="demo",
+        workspace="default",
+        status=SandboxStatusRef(phase=1, current_policy_version=1),
+    )
+
+    def conflict(**_kwargs):
+        raise _AlreadyExists()
+
+    monkeypatch.setattr(sdk, "create", conflict)
+    monkeypatch.setattr(gateway, "get", lambda name: existing)
+
+    ref = create(gateway)
+
+    assert ref is existing
+
+
+class _AlreadyExists(grpc.RpcError):
+    def code(self):
+        return grpc.StatusCode.ALREADY_EXISTS

@@ -29,7 +29,7 @@ from openhands.agent_server.docker_runtime.routers import (
     proxy_conversation,
 )
 from openhands.agent_server.event_router import event_read_router
-from openhands.agent_server.models import UpdateSecretsRequest
+from openhands.agent_server.models import StartConversationRequest, UpdateSecretsRequest
 from openhands.agent_server.persistence import PersistedSettings, ServerStores
 from openhands.agent_server.server_context import server_context_of
 from openhands.sdk.conversation.request import ConversationContainerOptions
@@ -970,6 +970,18 @@ def _governed_registry(tmp_path):
         def find(self, selector):
             return None
 
+        def get(self, name):
+            return None
+
+        def start(self, name):
+            raise AssertionError("no sandbox exists to start")
+
+        def delete(self, name):
+            pass
+
+        def read_file(self, name, path):
+            return None
+
         def close(self):
             pass
 
@@ -1069,3 +1081,65 @@ def test_docker_workspace_keeps_a_host_path(tmp_path):
 
     assert working_dir == "/tmp/project"
     assert host_workspace == Path("/tmp/project")
+
+
+def test_a_governed_server_refuses_a_docker_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "persistence"))
+    app = _governed_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/conversations", json={"conversation_runtime": "docker"}
+        )
+
+    assert response.status_code == 422
+    assert "openshell" in response.json()["detail"]
+
+
+def _governed_start_body(api_key: str) -> dict[str, object]:
+    return {
+        "workspace": {"kind": "LocalWorkspace", "working_dir": "/sandbox"},
+        "agent_settings": {
+            "agent_kind": "openhands",
+            "llm": {"model": "test", "api_key": api_key},
+        },
+    }
+
+
+def test_a_governed_start_refuses_a_real_model_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "persistence"))
+    app = _governed_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/conversations", json=_governed_start_body("sk-real")
+        )
+
+    assert response.status_code == 422
+    assert "placeholder" in response.json()["detail"]["message"]
+
+
+def test_a_governed_start_accepts_the_gateway_placeholder():
+    request = StartConversationRequest.model_validate(
+        _governed_start_body("openshell:resolve:env:v1_LITELLM_API_KEY")
+    )
+
+    routers._refuse_model_key(request, None)
+
+
+def test_a_start_of_an_archived_conversation_returns_410(tmp_path, monkeypatch):
+    monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "persistence"))
+    app = _governed_app(tmp_path, monkeypatch)
+    conversation_id = uuid4()
+    registry = app.state.conversation_registry
+    identity = registry.provisioning.create(conversation_id)
+    registry.provisioning.save(
+        identity.model_copy(update={"service_url": "https://gone:17670"})
+    )
+    body = _governed_start_body("openshell:resolve:env:v1_LITELLM_API_KEY")
+    body["conversation_id"] = str(conversation_id)
+
+    with TestClient(app) as client:
+        response = client.post("/api/conversations", json=body)
+
+    assert response.status_code == 410

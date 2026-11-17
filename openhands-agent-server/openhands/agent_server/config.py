@@ -414,6 +414,14 @@ class Config(BaseModel):
             "`OH_SECRET_KEY`."
         ),
     )
+
+    @property
+    def conversations_run_offhost(self) -> bool:
+        """Whether every conversation runs outside this server's process."""
+        if self.conversation_runtime_selectable:
+            return False
+        return self.conversation_runtime != "local"
+
     openshell_workspace: str = Field(
         default="default",
         description=(

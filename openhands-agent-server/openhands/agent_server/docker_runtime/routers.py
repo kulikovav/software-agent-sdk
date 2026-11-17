@@ -63,7 +63,12 @@ from openhands.sdk.errors import (
 )
 from openhands.sdk.git.exceptions import GitCommandError, GitRepositoryError
 from openhands.sdk.git.utils import run_git_command, validate_git_repository
-from openhands.sdk.launch import AgentLaunchError, LaunchStoreError, ResolvedLaunch
+from openhands.sdk.launch import (
+    AgentLaunchError,
+    LaunchSource,
+    LaunchStoreError,
+    ResolvedLaunch,
+)
 from openhands.sdk.logger import get_logger
 from openhands.sdk.profiles.agent_profile import LaunchedAgentProfile
 from openhands.sdk.profiles.resolver import ProfileNotFound
@@ -178,6 +183,60 @@ def _worktree_git_paths(workspace_path: Path) -> dict[str, Path]:
 # its own sandbox root; every other non-root path is a host path.
 _DEFAULT_WORKSPACE_ALIASES = frozenset({"/workspace"})
 
+# A governed start may carry this gateway placeholder instead of a key; the
+# provider resolves it at egress, so the key never enters the sandbox.
+_OPEN_SHELL_KEY_PREFIX = "openshell:resolve:"
+
+
+def _llm_key_of(holder: object) -> str | None:
+    """The model key a settings model, an agent, or a raw settings dict carries."""
+    if isinstance(holder, dict):
+        llm = holder.get("llm")
+        key: object = llm.get("api_key") if isinstance(llm, dict) else None
+    else:
+        key = getattr(getattr(holder, "llm", None), "api_key", None)
+    if key is None:
+        return None
+    secret = key.get_secret_value() if hasattr(key, "get_secret_value") else str(key)
+    return secret or None
+
+
+def _model_key_values(
+    request: StartConversationRequest, source: LaunchSource | None
+) -> list[tuple[str, str]]:
+    """Every model key this start would send into the runtime, by origin."""
+    holders: list[tuple[str, object]] = []
+    if source is not None:
+        holders.append(
+            (
+                "profile",
+                source.settings if isinstance(source, ResolvedLaunch) else source,
+            )
+        )
+    else:
+        holders.append(("agent_settings", request.agent_settings))
+        holders.append(("agent", request.agent))
+    values: list[tuple[str, str]] = []
+    for origin, holder in holders:
+        secret = _llm_key_of(holder)
+        if secret is not None:
+            values.append((origin, secret))
+    return values
+
+
+def _refuse_model_key(
+    request: StartConversationRequest, source: LaunchSource | None
+) -> None:
+    """Refuse a governed start that would carry a real model key inside."""
+    for origin, value in _model_key_values(request, source):
+        if not value.startswith(_OPEN_SHELL_KEY_PREFIX):
+            raise AgentLaunchError(
+                f"The {origin} model key would enter the sandbox. A governed "
+                "conversation accepts only the gateway placeholder "
+                "(openshell:resolve:...); store that placeholder in the LLM "
+                "profile instead of a real key."
+            )
+
 
 def _resolve_workspace(
     registry: DockerConversationRegistry,
@@ -227,8 +286,10 @@ async def start_docker_conversation(
 ) -> tuple[int, Any, UUID]:
     """Start a Docker conversation through the same path as the REST route."""
     body = body.copy()
-    if body.pop("conversation_runtime", None) not in (None, "docker", "openshell"):
-        raise Unprocessable("Unsupported conversation runtime")
+    requested_runtime = body.pop("conversation_runtime", None)
+    served_runtime = "openshell" if registry.governed else "docker"
+    if requested_runtime not in (None, served_runtime):
+        raise Unprocessable(f"This server only runs {served_runtime} conversations")
 
     workspace = body.get("workspace")
     if workspace is not None and (
@@ -300,6 +361,10 @@ async def start_docker_conversation(
         raise launch_error(exc) from exc
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
+    except RuntimeArchivedError as exc:
+        raise Gone(
+            "Conversation runtime was archived; its history is read-only"
+        ) from exc
     except httpx.HTTPError as exc:
         if not existing:
             await registry.stop(conversation_id)
@@ -321,8 +386,6 @@ async def start_docker_conversation(
             await registry.stop(conversation_id)
         content = {"detail": "Conversation runtime rejected the request"}
     else:
-        # The inner server wrote its conversation record inside the runtime;
-        # the outer catalog reads that record from the host.
         await asyncio.to_thread(registry.copy_conversation_record, conversation_id)
     return response.status_code, content, conversation_id
 
@@ -365,6 +428,8 @@ async def _prepare_forward(
             config.cipher,
         )
     )
+    if registry.governed:
+        _refuse_model_key(start, source)
 
     def payload(cipher: Cipher) -> dict[str, Any]:
         return forward_to_runtime(

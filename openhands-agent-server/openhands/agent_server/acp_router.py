@@ -159,7 +159,7 @@ async def discover_models(
     given credentials; a launch or authentication failure comes back in
     ``error`` rather than as an HTTP error.
     """
-    if config.conversation_runtime == "docker":
+    if config.conversations_run_offhost:
         raise NotSupported(
             "ACP model discovery runs only where conversations run in-process"
         )
