@@ -15,6 +15,10 @@ from fastapi import APIRouter, HTTPException, Query, Request, WebSocket
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from openhands.agent_server.dependencies import get_conversation_service
+from openhands.agent_server.docker_runtime.driver import (
+    ConversationDriver,
+    is_conversation_driver,
+)
 from openhands.agent_server.docker_runtime.mediation import materialize_secrets
 from openhands.agent_server.docker_runtime.proxy import (
     bridge_websocket,
@@ -23,7 +27,6 @@ from openhands.agent_server.docker_runtime.proxy import (
 )
 from openhands.agent_server.docker_runtime.registry import (
     ConversationContainer,
-    DockerConversationRegistry,
     RuntimeArchivedError,
 )
 from openhands.agent_server.launch import (
@@ -55,15 +58,15 @@ from openhands.sdk.workspace import LocalWorkspace
 logger = get_logger(__name__)
 
 
-def get_registry(request: Request) -> DockerConversationRegistry:
+def get_registry(request: Request) -> ConversationDriver:
     registry = request.app.state.conversation_registry
-    if not isinstance(registry, DockerConversationRegistry):
+    if not is_conversation_driver(registry):
         raise HTTPException(503, "Docker conversation runtime is unavailable")
     return registry
 
 
 async def _container(
-    registry: DockerConversationRegistry, conversation_id: UUID
+    registry: ConversationDriver, conversation_id: UUID
 ) -> ConversationContainer:
     if not registry.provisioning.manifest_path(conversation_id).is_file():
         raise HTTPException(404, "Conversation not found")
@@ -84,7 +87,7 @@ def _upstream_path(request: Request, path: str) -> str:
 
 
 async def _proxy_with_session(
-    registry: DockerConversationRegistry,
+    registry: ConversationDriver,
     conversation_id: UUID,
     container: ConversationContainer,
     request: Request,
@@ -153,7 +156,7 @@ async def start_conversation(
 
 async def start_docker_conversation(
     body: dict[str, Any],
-    registry: DockerConversationRegistry,
+    registry: ConversationDriver,
     *,
     include_skills: bool = False,
 ) -> tuple[int, Any, UUID]:
@@ -271,7 +274,7 @@ async def start_docker_conversation(
 
 
 async def _prepare_forward(
-    body: dict[str, Any], registry: DockerConversationRegistry, *, existing: bool
+    body: dict[str, Any], registry: ConversationDriver, *, existing: bool
 ) -> tuple[
     Callable[[Cipher], dict[str, Any]],
     LaunchedAgentProfile | None,
@@ -508,7 +511,7 @@ async def _proxy_socket(
     if not await _accept_authenticated_websocket(websocket, session_api_key):
         return
     registry = websocket.app.state.conversation_registry
-    if not isinstance(registry, DockerConversationRegistry):
+    if not is_conversation_driver(registry):
         await websocket.close(code=1011)
         return
     try:

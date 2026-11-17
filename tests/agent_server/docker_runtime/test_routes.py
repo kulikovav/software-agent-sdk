@@ -15,6 +15,7 @@ from starlette.routing import Match
 
 from openhands.agent_server.api import create_app
 from openhands.agent_server.config import Config
+from openhands.agent_server.conversation_registry import ConversationRegistry
 from openhands.agent_server.docker_runtime import routers
 from openhands.agent_server.docker_runtime.provisioning import RuntimeProvisioningStore
 from openhands.agent_server.docker_runtime.registry import (
@@ -849,3 +850,15 @@ def test_invalid_container_options_are_rejected(tmp_path, monkeypatch):
 
     assert response.status_code == 422
     assert registry.provisioning.load_optional(conversation_id) is None
+
+
+def test_host_local_registry_is_not_a_conversation_driver(tmp_path):
+    config = Config(
+        conversation_runtime="local",
+        conversations_path=tmp_path / "conversations",
+        workspace_path=tmp_path / "workspaces",
+        secret_key=SecretStr("outer-key"),
+    )
+
+    assert not routers.is_conversation_driver(ConversationRegistry(config))
+    assert routers.is_conversation_driver(DockerConversationRegistry(config))
