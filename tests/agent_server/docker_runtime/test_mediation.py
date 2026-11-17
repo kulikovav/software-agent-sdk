@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -182,6 +183,80 @@ async def test_an_existing_governed_start_is_not_reinjected(tmp_path, monkeypatc
     assert forwarded.get("hook_config") is None
     additions = forwarded.get("agent_launch_additions") or {}
     assert additions.get("system_message_suffix_append") is None
+
+
+_MCP_SERVERS = {
+    "srv": MCPServer(command="echo", env={"TOKEN": SecretStr("mcp-token")}),
+}
+
+
+@pytest.mark.asyncio
+async def test_a_governed_start_drops_its_mcp_servers(tmp_path, monkeypatch, caplog):
+    runtime_config = config(tmp_path, monkeypatch)
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        agent=Agent(
+            llm=LLM(model="test", api_key=_GOVERNED_KEY),
+            mcp_config=_MCP_SERVERS,
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        payload, _, _, _ = await _prepare_forward(
+            request.model_dump(mode="json", context={"expose_secrets": True}),
+            _governed_registry(runtime_config),
+            existing=False,
+        )
+    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+
+    assert forwarded["agent"]["mcp_config"] == {}
+    assert "drops MCP servers" in caplog.text
+    assert "srv" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_governed_settings_start_drops_its_mcp_servers(
+    tmp_path, monkeypatch, caplog
+):
+    runtime_config = config(tmp_path, monkeypatch)
+    settings = OpenHandsAgentSettings(
+        llm=LLM(model="test", api_key=_GOVERNED_KEY),
+        mcp_config=_MCP_SERVERS,
+    )
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        agent_settings=settings.model_dump(
+            mode="json", context={"expose_secrets": True}
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        payload, launched, _, _ = await _prepare_forward(
+            request.model_dump(mode="json", context={"expose_secrets": True}),
+            _governed_registry(runtime_config),
+            existing=False,
+        )
+    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+
+    assert forwarded["agent_settings"]["mcp_config"] == {}
+    assert "srv" in caplog.text
+    assert launched is None
+
+
+@pytest.mark.asyncio
+async def test_an_ungoverned_start_keeps_its_mcp_servers(tmp_path, monkeypatch):
+    runtime_config = config(tmp_path, monkeypatch)
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        agent=Agent(
+            llm=LLM(model="test", api_key=SecretStr("model-key")),
+            mcp_config=_MCP_SERVERS,
+        ),
+    )
+
+    payload, _, _ = await _forward(request, runtime_config)
+
+    assert payload["agent"]["mcp_config"]["srv"]["command"] == "echo"
 
 
 @pytest.mark.asyncio
