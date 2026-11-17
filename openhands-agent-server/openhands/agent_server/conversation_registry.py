@@ -91,6 +91,12 @@ def create_conversation_registry(
         )
 
         return HybridConversationRegistry(config, stores)
+    if config.conversation_runtime == "openshell":
+        from openhands.agent_server.docker_runtime.openshell.registry import (
+            OpenShellConversationRegistry,
+        )
+
+        return OpenShellConversationRegistry(config, stores)
     if config.conversation_runtime == "docker":
         from openhands.agent_server.docker_runtime.registry import (
             DockerConversationRegistry,

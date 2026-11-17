@@ -403,7 +403,7 @@ class Config(BaseModel):
             "server did not actually receive."
         ),
     )
-    conversation_runtime: Literal["local", "docker"] = "local"
+    conversation_runtime: Literal["local", "docker", "openshell"] = "local"
     conversation_runtime_selectable: bool = Field(
         default=False,
         description=(
@@ -412,6 +412,34 @@ class Config(BaseModel):
             "it unset use this server's `conversation_runtime`. Requires a "
             "Docker daemon and "
             "`OH_SECRET_KEY`."
+        ),
+    )
+    openshell_workspace: str = Field(
+        default="default",
+        description=(
+            "OpenShell workspace that owns the governed sandboxes. Every "
+            "sandbox operation names it explicitly."
+        ),
+    )
+    openshell_cluster: str | None = Field(
+        default=None,
+        description=(
+            "Registered OpenShell gateway name for the governed runtime. "
+            "Unset selects the CLI's active gateway."
+        ),
+    )
+    openshell_provider: str | None = Field(
+        default=None,
+        description=(
+            "Provider profile attached to every governed sandbox, so the "
+            "model endpoint resolves without a key inside the sandbox."
+        ),
+    )
+    openshell_tls_ca: str | None = Field(
+        default=None,
+        description=(
+            "CA bundle that verifies the gateway's HTTPS service URLs. Unset "
+            "uses the system trust store."
         ),
     )
     conversation_image: str = DEFAULT_CONVERSATION_IMAGE
