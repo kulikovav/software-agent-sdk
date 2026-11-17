@@ -59,6 +59,9 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
     CA. Conversation state lives under ``/sandbox`` inside the sandbox.
     """
 
+    inner_workspace_root = _SANDBOX_HOME
+    governed = True
+
     def __init__(
         self,
         config: Config,

@@ -130,6 +130,11 @@ class ContainerLease:
 
 
 class DockerConversationRegistry(ConversationRegistry):
+    # The docker runtime mounts the host workspace at /workspace inside the
+    # container; a governed runtime uses its own in-sandbox root instead.
+    inner_workspace_root = "/workspace"
+    governed = False
+
     def __init__(self, config: Config, stores: ServerStores) -> None:
         super().__init__(config, stores)
         paths = (

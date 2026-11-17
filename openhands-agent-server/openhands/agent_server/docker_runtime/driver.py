@@ -30,6 +30,10 @@ class ConversationDriver(Protocol):
 
     config: Config
     provisioning: RuntimeProvisioningStore
+    # Root the inner agent server sees; a governed runtime keeps it inside the
+    # sandbox, so a host path in a start request is refused.
+    inner_workspace_root: str
+    governed: bool
 
     def conversation_dir(self, conversation_id: UUID) -> Path: ...
 

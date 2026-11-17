@@ -217,8 +217,13 @@ async def start_docker_conversation(
         or workspace.get("kind", "LocalWorkspace") != "LocalWorkspace"
     ):
         raise Unprocessable("Docker conversations require a local workspace")
-    working_dir = (workspace or {}).get("working_dir", "/workspace")
-    host_workspace = None if working_dir == "/workspace" else Path(working_dir)
+    inner_root = registry.inner_workspace_root
+    working_dir = (workspace or {}).get("working_dir", inner_root)
+    if registry.governed and (body.get("worktree") or working_dir != inner_root):
+        raise Unprocessable(
+            "A governed conversation runs only in the sandbox workspace",
+        )
+    host_workspace = None if working_dir == inner_root else Path(working_dir)
 
     try:
         conversation_id = (
@@ -227,7 +232,7 @@ async def start_docker_conversation(
     except (TypeError, ValueError) as exc:
         raise Invalid("Invalid conversation_id") from exc
     body["conversation_id"] = str(conversation_id)
-    body["workspace"] = {"kind": "LocalWorkspace", "working_dir": "/workspace"}
+    body["workspace"] = {"kind": "LocalWorkspace", "working_dir": inner_root}
 
     # Only a conversation the container already created is left alone on
     # failure; a manifest from a failed earlier start is retried like a new one.
