@@ -16,6 +16,7 @@ from openhands.agent_server.docker_runtime.registry import (
     _OBSERVABILITY_ENV_VARS,
     ConversationContainer,
     DockerConversationRegistry,
+    RuntimeArchivedError,
 )
 from openhands.agent_server.persistence import ServerStores
 from openhands.sdk.logger import get_logger
@@ -88,6 +89,11 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
         sandbox = self.gateway.get(name)
         if sandbox is None:
             sandbox = self.gateway.find(f"{_CONVERSATION_LABEL}={conversation_id.hex}")
+        if sandbox is None and identity.service_url:
+            # The sandbox held the conversation state, so a recorded runtime
+            # the gateway no longer has cannot be resumed.
+            self.mark_archived(conversation_id)
+            raise RuntimeArchivedError("Conversation sandbox no longer exists")
         if sandbox is None:
             sandbox = self.gateway.create(
                 name=name,
