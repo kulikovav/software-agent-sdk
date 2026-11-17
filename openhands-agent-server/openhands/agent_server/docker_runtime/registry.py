@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import ssl
 import subprocess
@@ -11,6 +12,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from urllib.error import URLError
@@ -182,6 +184,12 @@ class DockerConversationRegistry(ConversationRegistry):
 
     def is_archived(self, conversation_id: UUID) -> bool:
         return self.archived_marker(conversation_id).exists()
+
+    def mark_archived(self, conversation_id: UUID) -> None:
+        """Record the runtime as gone; its state cannot be read again."""
+        self.archived_marker(conversation_id).write_text(
+            json.dumps({"archived_at": datetime.now(UTC).isoformat()})
+        )
 
     def runtime_info(self, conversation_id: UUID) -> ConversationRuntimeInfo:
         identity = self.provisioning.load_optional(conversation_id)

@@ -12,6 +12,8 @@ from openhands.agent_server.docker_runtime.openshell.client import OpenShellGate
 from openhands.agent_server.docker_runtime.openshell.registry import (
     OpenShellConversationRegistry,
 )
+from openhands.agent_server.docker_runtime.registry import RuntimeArchivedError
+from openhands.agent_server.models import ConversationRuntimeStatus
 
 
 def make_sandbox(name, phase=pb.SANDBOX_PHASE_READY, service_urls=None):
@@ -213,6 +215,40 @@ def test_a_failed_adopted_start_keeps_the_sandbox(tmp_path, monkeypatch):
         registry._build_container(conversation_id)
 
     assert gateway.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_a_gone_sandbox_is_not_recreated(tmp_path):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    conversation_id = uuid4()
+    identity = registry.provisioning.create(conversation_id)
+    registry.provisioning.save(
+        identity.model_copy(update={"service_url": "https://sandbox:17670"})
+    )
+
+    with pytest.raises(RuntimeArchivedError):
+        await registry.get_or_create(conversation_id)
+
+    assert gateway.created == []
+    assert registry.is_archived(conversation_id)
+
+
+def test_a_vanished_sandbox_is_archived_for_resume(tmp_path):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    conversation_id = uuid4()
+    identity = registry.provisioning.create(conversation_id)
+    registry.provisioning.save(
+        identity.model_copy(update={"service_url": "https://sandbox:17670"})
+    )
+
+    with pytest.raises(RuntimeArchivedError):
+        registry._build_container(conversation_id)
+
+    info = registry.runtime_info(conversation_id)
+    assert info.runtime_status == ConversationRuntimeStatus.MISSING
+    assert info.can_resume is False
 
 
 def test_copy_conversation_record_writes_the_outer_record(tmp_path):
