@@ -18,6 +18,7 @@ from openhands.sdk.event.llm_convertible import (
     SystemPromptEvent,
     UserRejectObservation,
 )
+from openhands.sdk.event.policy import PolicyEvent
 from openhands.sdk.event.resume_transcript import (
     RESUME_CONTEXT_MARKER,
     render_resume_transcript,
@@ -44,6 +45,7 @@ __all__ = [
     "RejectionSource",
     "InterruptEvent",
     "PauseEvent",
+    "PolicyEvent",
     "StreamingDeltaEvent",
     "Condensation",
     "CondensationRequest",

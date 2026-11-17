@@ -1,6 +1,7 @@
 from openhands.agent_server.docker_runtime.openshell.events import (
     GOVERNANCE_CONTEXT,
     PolicyDenial,
+    denied_event,
     parse_denial,
 )
 
@@ -64,3 +65,17 @@ def test_summary_names_the_destination_and_reason():
 def test_governance_context_states_default_deny_and_one_retry():
     assert "denied by default" in GOVERNANCE_CONTEXT
     assert "one retry" in GOVERNANCE_CONTEXT
+
+
+def test_denied_event_carries_the_decision():
+    denial = parse_denial(
+        "HTTP:GET DENIED  GET https://example/v1/x "
+        "[policy:canvas_ingress engine:l7]"
+    )
+
+    event = denied_event(denial)
+
+    assert event.kind == "PolicyEvent"
+    assert event.status == "denied"
+    assert event.destination == "https://example/v1/x"
+    assert event.reason == "canvas_ingress"
