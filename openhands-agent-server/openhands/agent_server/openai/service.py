@@ -718,7 +718,9 @@ async def _run_docker_agent(
     container = await _container(registry, conversation_id)
     registry.attach_session(conversation_id)
     try:
-        async with httpx.AsyncClient(timeout=130.0, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=130.0, trust_env=False, verify=container.ca_bundle or True
+        ) as client:
             response = await client.post(
                 f"{container.host}/api/conversations/{conversation_id}/events/_gateway/run",
                 headers={"X-Session-API-Key": container.api_key},
