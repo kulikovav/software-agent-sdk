@@ -10,8 +10,10 @@ dependencies = [
   "certifi>=2026.10.19",  # eMudhra CA distrust: GHSA-6q48-6c7w-9gw2
   "docker>=7.2.0,<8",
   "fastapi>=0.104",
+  "grpcio>=1.78.0",  # the OpenShell 0.1.7 bindings refuse older grpcio at import
   "openhands-sdk",
   "openhands-tools",
+  "openshell==0.1.7",  # SDK bindings match the pinned gateway 0.1.7; bump both together
   "openai>=2.33.0,<3",
   "pydantic>=2.14.3",
   "sqlalchemy>=2.1.9",
