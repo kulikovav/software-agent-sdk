@@ -4098,3 +4098,70 @@ class TestEmitEventFromThreadFailures:
         )
         scheduled = mock_loop.call_soon_threadsafe.call_args.args
         assert scheduled[0] == finished.add_done_callback
+
+
+def _service_with_workspace(tmp_path: Path, working_dir: str) -> EventService:
+    return EventService(
+        stored=StoredConversation(
+            id=uuid4(),
+            workspace=LocalWorkspace(working_dir=working_dir),
+            confirmation_policy=NeverConfirm(),
+            initial_message=None,
+            metrics=None,
+            created_at=datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC),
+            updated_at=datetime(2025, 1, 1, 12, 30, 0, tzinfo=UTC),
+        ),
+        conversations_dir=tmp_path / "conversations",
+    )
+
+
+def test_a_governed_workspace_is_not_created_on_the_host(tmp_path, monkeypatch):
+    """The outer copy of a governed conversation records ``/sandbox``.
+
+    The sandbox server owns that path; a read on the serving host must keep
+    its workspace under the conversation state instead of creating a
+    top-level directory, which the kernel refuses with EACCES.
+    """
+    monkeypatch.setenv("HOME", "/sandbox")
+    monkeypatch.delenv("OH_CONVERSATIONS_PATH", raising=False)
+    service = _service_with_workspace(tmp_path, "/sandbox")
+
+    created: list[str] = []
+    real_mkdir = Path.mkdir
+
+    def refuse_outside_the_conversations_root(self, *args, **kwargs):
+        created.append(str(self))
+        if not self.resolve().is_relative_to((tmp_path / "conversations").resolve()):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", refuse_outside_the_conversations_root)
+
+    workspace = service._prepare_working_dir(service.stored.workspace)
+
+    fallback = tmp_path / "conversations" / service.stored.id.hex / "workspace"
+    assert Path(workspace.working_dir) == fallback
+    assert fallback.is_dir()
+    assert "/sandbox" not in created
+
+
+def test_a_workspace_under_the_conversations_root_is_created(tmp_path):
+    service = _service_with_workspace(
+        tmp_path, str(tmp_path / "conversations" / "owned" / "project")
+    )
+
+    workspace = service._prepare_working_dir(service.stored.workspace)
+
+    expected = tmp_path / "conversations" / "owned" / "project"
+    assert Path(workspace.working_dir) == expected
+    assert expected.is_dir()
+
+
+def test_an_existing_workspace_is_used_unchanged(tmp_path):
+    existing = tmp_path / "project"
+    existing.mkdir()
+    service = _service_with_workspace(tmp_path, str(existing))
+
+    workspace = service._prepare_working_dir(service.stored.workspace)
+
+    assert workspace is service.stored.workspace
