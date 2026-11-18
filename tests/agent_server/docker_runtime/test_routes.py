@@ -975,6 +975,50 @@ def test_governed_workspace_maps_the_docker_root_to_the_sandbox(tmp_path):
     assert host_workspace is None
 
 
+@pytest.mark.parametrize(
+    "default",
+    [
+        "project",
+        "project/0123456789abcdef",
+    ],
+)
+def test_governed_workspace_accepts_the_canvas_default_and_rewrites_it(
+    tmp_path, default
+):
+    """Canvas anchors ``workspace/project/<id>`` on this server's own root."""
+    registry = _governed_registry(tmp_path)
+    requested = registry.config.workspace_path / default
+
+    working_dir, host_workspace = routers._resolve_workspace(
+        registry, None, {"working_dir": requested.as_posix()}
+    )
+
+    assert working_dir == "/sandbox"
+    assert host_workspace is None
+
+
+def test_governed_workspace_accepts_a_relative_request(tmp_path):
+    """A relative path resolves inside the runtime, never on the host."""
+    registry = _governed_registry(tmp_path)
+
+    working_dir, host_workspace = routers._resolve_workspace(
+        registry, None, {"working_dir": "workspace/project/a1b2c3"}
+    )
+
+    assert working_dir == "/sandbox"
+    assert host_workspace is None
+
+
+@pytest.mark.parametrize("workspace", [None, {}, {"working_dir": None}])
+def test_governed_workspace_accepts_no_requested_directory(tmp_path, workspace):
+    registry = _governed_registry(tmp_path)
+
+    working_dir, host_workspace = routers._resolve_workspace(registry, None, workspace)
+
+    assert working_dir == "/sandbox"
+    assert host_workspace is None
+
+
 def test_governed_workspace_refuses_another_host_path(tmp_path):
     registry = _governed_registry(tmp_path)
 
