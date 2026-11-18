@@ -6,7 +6,7 @@ import asyncio
 import json
 import subprocess
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -184,7 +184,8 @@ def _worktree_git_paths(workspace_path: Path) -> dict[str, Path]:
 
 # Canvas sends ``/workspace`` for a backend it treats as the Docker runtime,
 # where that path is the default workspace. A governed runtime maps the alias to
-# its own sandbox root; every other non-root path is a host path.
+# its own sandbox root; another absolute path is a host path unless it lies
+# under a runtime root (see ``_is_runtime_workspace``).
 _DEFAULT_WORKSPACE_ALIASES = frozenset({"/workspace"})
 
 # A governed start may carry this gateway placeholder instead of a key; the
@@ -261,6 +262,30 @@ def _strip_governed_mcp(source: LaunchSource) -> tuple[LaunchSource, list[str]]:
     return source.model_copy(update={"mcp_config": {}}), dropped
 
 
+def _is_runtime_workspace(
+    requested: str, inner_root: str, workspace_root: Path
+) -> bool:
+    """Whether a requested directory belongs to the runtime, not the host.
+
+    A relative path resolves inside the runtime, never on the host. An
+    absolute path belongs to the runtime only under a known runtime root: the
+    Docker alias, the driver's inner root, or this server's configured
+    workspace root.
+
+    Canvas anchors its default working directory on this server's file home,
+    so a governed start names a directory under the configured workspace root.
+    The start rewrites every accepted path to the inner root; the sandbox never
+    sees the host tree, and any other absolute path stays a refusal.
+    """
+    if not isinstance(requested, str) or not requested:
+        return False
+    path = PurePosixPath(requested)
+    if not path.is_absolute():
+        return True
+    roots = (*_DEFAULT_WORKSPACE_ALIASES, inner_root, workspace_root.as_posix())
+    return any(path.is_relative_to(PurePosixPath(root)) for root in roots)
+
+
 def _resolve_workspace(
     registry: DockerConversationRegistry,
     worktree: object,
@@ -268,9 +293,13 @@ def _resolve_workspace(
 ) -> tuple[str, Path | None]:
     """Resolve the requested workspace, refusing a governed host path."""
     inner_root = registry.inner_workspace_root
-    working_dir = (workspace or {}).get("working_dir", inner_root)
+    # A null working directory means "the driver's root", like a missing one.
+    working_dir = (workspace or {}).get("working_dir") or inner_root
     if registry.governed:
-        if worktree or working_dir not in _DEFAULT_WORKSPACE_ALIASES | {inner_root}:
+        runtime_workspace = _is_runtime_workspace(
+            working_dir, inner_root, registry.config.workspace_path
+        )
+        if worktree or not runtime_workspace:
             raise Unprocessable(
                 "A governed conversation runs only in the sandbox workspace",
             )
