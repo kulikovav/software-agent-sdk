@@ -217,6 +217,14 @@ class DockerConversationRegistry(ConversationRegistry):
     def serves_persisted_event_reads(self, _conversation_id: UUID) -> bool:
         return True
 
+    def refresh_catalog_record(self, conversation_id: UUID) -> None:
+        """Copy a runtime-owned conversation record into the outer catalog.
+
+        The catalog is a listing snapshot. A registry whose runtime owns the
+        conversation state overrides this to pull a fresh record, so a catalog
+        row shows the state the conversation actually reached.
+        """
+
     async def start(self) -> None:
         await asyncio.to_thread(self.cleanup_stale_containers)
         # After the cleanup: with no container left, every runtime is reclaimable.
