@@ -1402,6 +1402,37 @@ class EventService:
                 "Failed to initialize git repository at %s: %s", working_dir, e
             )
 
+    def _prepare_working_dir(self, workspace: LocalWorkspace) -> LocalWorkspace:
+        """Return a workspace this server can open, creating its directory.
+
+        A conversation served by a runtime records its working directory as it
+        appears *inside* that runtime: a governed conversation keeps
+        ``/sandbox``. The catalog copies that record to the serving host, so
+        starting a service here used to create a top-level directory such as
+        ``/sandbox`` on the host, which the kernel refuses with EACCES and the
+        event read fails. Create a directory only when this server owns it —
+        an existing directory, or a path under the conversations root.
+        Otherwise keep the workspace beside the conversation state.
+        """
+        requested = Path(workspace.working_dir)
+        if requested.is_dir():
+            return workspace
+        owned = False
+        with suppress(OSError):
+            owned = requested.resolve().is_relative_to(self.conversations_dir.resolve())
+        if owned:
+            requested.mkdir(parents=True, exist_ok=True)
+            return workspace
+        fallback = self.conversation_dir / "workspace"
+        fallback.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Conversation %s records workspace %s outside this server; using %s",
+            self.stored.id,
+            requested,
+            fallback,
+        )
+        return workspace.model_copy(update={"working_dir": str(fallback)})
+
     async def start(self):
         # Store the main event loop for cross-thread communication
         self._main_loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
@@ -1426,6 +1457,7 @@ class EventService:
         await self._scrub_persisted_credentials()
         workspace = self.stored.workspace
         assert isinstance(workspace, LocalWorkspace)
+        workspace = self._prepare_working_dir(workspace)
         await asyncio.to_thread(
             self._prepare_workspace_dir, Path(workspace.working_dir)
         )
