@@ -617,6 +617,7 @@ async def proxy_conversation(
             upstream_path=upstream_path,
         )
     if request.method not in {"GET", "HEAD", "OPTIONS"} and response.status_code < 400:
+        await asyncio.to_thread(registry.refresh_catalog_record, conversation_id)
         await get_conversation_service(request).refresh_persisted_conversation(
             conversation_id
         )
@@ -682,6 +683,9 @@ async def _proxy_socket(
         if release is not None:
             release()
         registry.detach_session(conversation_id)
+        # The turn is over: pull the record the runtime ended with, so the
+        # catalog reports the state the conversation actually reached.
+        await asyncio.to_thread(registry.refresh_catalog_record, conversation_id)
         await websocket.app.state.conversation_service.refresh_persisted_conversation(
             conversation_id
         )

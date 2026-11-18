@@ -368,6 +368,50 @@ def test_event_reads_are_not_served_from_the_host(tmp_path):
     assert registry.serves_persisted_event_reads(uuid4()) is False
 
 
+def test_governed_reads_go_through_the_conversation_proxy(tmp_path):
+    """A persisted read route would answer from the catalog copy, not the sandbox."""
+    from fastapi import APIRouter
+    from fastapi.routing import APIRoute
+
+    registry = make_registry(tmp_path, FakeGateway())
+    router = APIRouter()
+
+    registry.add_execution_routes(router)
+
+    paths = {route.path for route in router.routes if isinstance(route, APIRoute)}
+    assert "/conversations/{conversation_id}/{tail:path}" in paths
+    assert "/conversations/{conversation_id}/events" not in paths
+    assert "/conversations/{conversation_id}/events/{event_id}" not in paths
+
+
+def test_refresh_catalog_record_replaces_a_stale_status(tmp_path):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    conversation_id = uuid4()
+    base = f"/sandbox/conversations/{conversation_id.hex}"
+    gateway.files[f"{base}/meta.json"] = '{"id": "conversation"}'
+    gateway.files[f"{base}/base_state.json"] = '{"execution_status": "finished"}'
+    target = registry.conversation_dir(conversation_id) / "base_state.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"execution_status": "error"}', encoding="utf-8")
+
+    registry.refresh_catalog_record(conversation_id)
+
+    assert target.read_text(encoding="utf-8") == '{"execution_status": "finished"}'
+
+
+def test_refresh_catalog_record_survives_a_gateway_failure(tmp_path, monkeypatch):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+
+    def gateway_down(name, path):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(gateway, "read_file", gateway_down)
+
+    registry.refresh_catalog_record(uuid4())
+
+
 def test_delete_runtime_deletes_the_sandbox(tmp_path):
     gateway = FakeGateway()
     registry = make_registry(tmp_path, gateway)

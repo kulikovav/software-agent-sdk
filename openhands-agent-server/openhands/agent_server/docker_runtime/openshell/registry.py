@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 import grpc
+from fastapi import APIRouter
 from openshell._proto import openshell_pb2 as pb
 
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
@@ -160,6 +161,33 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
     def serves_persisted_event_reads(self, _conversation_id: UUID) -> bool:
         """Conversation state lives in the sandbox, so reads proxy to it."""
         return False
+
+    def add_execution_routes(self, router: APIRouter) -> None:
+        """Mount the conversation proxy, not the outer's persisted reads.
+
+        The event log, the workspace, and the live status all belong to the
+        sandbox. The generic conversation proxy forwards those reads there.
+        Mounting the persisted read routes would answer from the catalog copy
+        instead, which holds only ``meta.json`` and ``base_state.json``, and
+        starting a local service for the missing history would rewrite that
+        copy with a state the host invented.
+        """
+        from openhands.agent_server.docker_runtime.routers import (
+            docker_conversation_router,
+        )
+
+        router.include_router(docker_conversation_router)
+
+    def refresh_catalog_record(self, conversation_id: UUID) -> None:
+        """Copy the sandbox's record so the catalog shows its real state."""
+        try:
+            self.copy_conversation_record(conversation_id)
+        except Exception:
+            logger.debug(
+                "Could not refresh the catalog record for %s",
+                conversation_id,
+                exc_info=True,
+            )
 
     def _build_container(self, conversation_id: UUID) -> ConversationContainer:
         identity = self.provisioning.load(conversation_id)
