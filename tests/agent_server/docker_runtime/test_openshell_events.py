@@ -379,6 +379,7 @@ def _transport(
     posts: list[dict[str, Any]],
     execution_status: str = "idle",
     fail_posts: bool = False,
+    updated_at: str = "2026-01-01T00:00:00Z",
 ) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
@@ -392,7 +393,10 @@ def _transport(
                 }
             )
             return httpx.Response(200, json={"success": True})
-        return httpx.Response(200, json={"execution_status": execution_status})
+        return httpx.Response(
+            200,
+            json={"execution_status": execution_status, "updated_at": updated_at},
+        )
 
     return httpx.MockTransport(handler)
 
@@ -446,6 +450,7 @@ class _FakeRegistry:
         self._state: dict[str, Any] | None = None
         self.saved: list[dict[str, Any]] = []
         self.synced: list[Any] = []
+        self.fail_syncs = 0
 
     def sandbox_name(self, conversation_id: Any) -> str:
         return "oh-sandbox"
@@ -455,8 +460,12 @@ class _FakeRegistry:
             return [(self.conversation_id, self.container)]
         return []
 
-    async def sync_conversation_record(self, conversation_id: Any) -> None:
+    async def sync_conversation_record(self, conversation_id: Any) -> bool:
         self.synced.append(conversation_id)
+        if self.fail_syncs:
+            self.fail_syncs -= 1
+            return False
+        return True
 
     def acquire_lease(self, conversation_id: Any):
         self.leases += 1
@@ -635,8 +644,8 @@ class TestPolicyEventWatcher:
         await watcher.cycle()
         await watcher.cycle()
 
-        # One refresh per transition: a finished conversation must not rewrite
-        # its catalog row on every watch cycle.
+        # One refresh per record identity: a finished conversation must not
+        # rewrite its catalog row on every watch cycle.
         assert registry.synced == [registry.conversation_id]
 
     @pytest.mark.asyncio
@@ -652,10 +661,21 @@ class TestPolicyEventWatcher:
     @pytest.mark.asyncio
     async def test_each_finished_turn_refreshes_the_catalog_record(self):
         registry = _FakeRegistry()
-        statuses = iter(["running", "finished", "finished", "running", "finished"])
+        snapshots = iter(
+            [
+                ("running", "2026-01-01T00:00:00Z"),
+                ("finished", "2026-01-01T00:00:01Z"),
+                ("finished", "2026-01-01T00:00:01Z"),
+                ("running", "2026-01-01T00:00:02Z"),
+                ("finished", "2026-01-01T00:00:03Z"),
+            ]
+        )
 
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"execution_status": next(statuses)})
+            status, updated_at = next(snapshots)
+            return httpx.Response(
+                200, json={"execution_status": status, "updated_at": updated_at}
+            )
 
         watcher = PolicyEventWatcher(registry.gateway, registry, interval=5.0)
         watcher._http_client = lambda container: httpx.AsyncClient(  # type: ignore[method-assign]
@@ -666,5 +686,51 @@ class TestPolicyEventWatcher:
             await watcher.cycle()
 
         # The first and the second turn each reach a terminal state; the two
-        # cycles that observe the same finished state refresh nothing.
+        # cycles that observe the same finished record refresh nothing.
         assert registry.synced == [registry.conversation_id] * 2
+
+    @pytest.mark.asyncio
+    async def test_a_quick_second_turn_is_synced_between_polls(self):
+        registry = _FakeRegistry()
+        snapshots = iter(
+            [
+                ("finished", "2026-01-01T00:00:01Z"),
+                ("finished", "2026-01-01T00:00:02Z"),
+            ]
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            status, updated_at = next(snapshots)
+            return httpx.Response(
+                200, json={"execution_status": status, "updated_at": updated_at}
+            )
+
+        watcher = PolicyEventWatcher(registry.gateway, registry, interval=5.0)
+        watcher._http_client = lambda container: httpx.AsyncClient(  # type: ignore[method-assign]
+            transport=httpx.MockTransport(handler)
+        )
+
+        await watcher.cycle()
+        await watcher.cycle()
+
+        # Both observations read finished, but the second turn produced a new
+        # record identity, so its terminal state still reaches the catalog.
+        assert registry.synced == [registry.conversation_id] * 2
+
+    @pytest.mark.asyncio
+    async def test_a_failed_catalog_refresh_is_retried(self):
+        registry = _FakeRegistry()
+        registry.fail_syncs = 1
+        posts: list[dict[str, Any]] = []
+        watcher = _watcher(registry, posts, execution_status="finished")
+
+        await watcher.cycle()
+
+        assert registry.synced == [registry.conversation_id]
+        # The failed copy must not mark the terminal record as synced.
+        assert registry.conversation_id not in watcher._last_status
+
+        await watcher.cycle()
+
+        assert registry.synced == [registry.conversation_id] * 2
+        assert registry.conversation_id in watcher._last_status

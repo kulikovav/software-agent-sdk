@@ -711,8 +711,8 @@ async def _proxy_socket(
         if release is not None:
             release()
         registry.detach_session(conversation_id)
-        # The socket is the end of the client session, not of a turn: pull the
-        # record once more so a turn that finished while attached is visible.
+        # A socket detach is not a turn boundary: pull the record after detach
+        # so a turn that finished while attached is visible.
         await registry.sync_conversation_record(
             conversation_id, websocket.app.state.conversation_service
         )

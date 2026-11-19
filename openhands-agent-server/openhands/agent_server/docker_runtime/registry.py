@@ -174,18 +174,27 @@ class DockerConversationRegistry(ConversationRegistry):
         self,
         conversation_id: UUID,
         service: ConversationService | None = None,
-    ) -> None:
-        """Make the outer catalog show the record the runtime ended with.
+    ) -> bool:
+        """Copy the runtime record into the catalog, then reload the row.
 
-        This is the single writer for a runtime-owned status record: it copies
-        the runtime's record and then reloads the catalog row. Every caller
-        that observes a runtime state change goes through here, so a catalog
-        row cannot be updated from two different snapshots.
+        This is the shared writer for the callers that observe a runtime
+        change: a proxied write, a socket detach, and the governed policy
+        watch. It returns whether the copy was confirmed, so a caller that
+        deduplicates refreshes can retry a failed or partial copy.
+
+        Not every catalog write goes through here. The create path calls
+        ``copy_conversation_record`` directly and then reloads; release,
+        delete, and idle eviction reload only. Idle eviction reads a governed
+        conversation's terminal status from the outer catalog, so it depends
+        on the policy watch having synced that status first.
         """
-        await asyncio.to_thread(self.refresh_catalog_record, conversation_id)
+        copied = await asyncio.to_thread(self.refresh_catalog_record, conversation_id)
+        if not copied:
+            return False
         target = service or self._service
         if target is not None:
             await target.refresh_persisted_conversation(conversation_id)
+        return True
 
     def resolve_persisted_cipher(self, conversation_id: UUID) -> Cipher:
         """Resolve persisted state without weakening per-runtime isolation.
@@ -232,13 +241,15 @@ class DockerConversationRegistry(ConversationRegistry):
     def serves_persisted_event_reads(self, _conversation_id: UUID) -> bool:
         return True
 
-    def refresh_catalog_record(self, conversation_id: UUID) -> None:
+    def refresh_catalog_record(self, _conversation_id: UUID) -> bool:
         """Copy a runtime-owned conversation record into the outer catalog.
 
         The catalog is a listing snapshot. A registry whose runtime owns the
         conversation state overrides this to pull a fresh record, so a catalog
-        row shows the state the conversation actually reached.
+        row shows the state the conversation actually reached. Returns True
+        when the record is current; the default runtime writes it in place.
         """
+        return True
 
     async def start(self) -> None:
         await asyncio.to_thread(self.cleanup_stale_containers)
@@ -482,13 +493,15 @@ class DockerConversationRegistry(ConversationRegistry):
         keeps its sandbox until the gateway deletes it.
         """
 
-    def copy_conversation_record(self, conversation_id: UUID) -> None:
+    def copy_conversation_record(self, _conversation_id: UUID) -> bool:
         """Make the runtime's conversation record readable on the host.
 
         A Docker runtime bind-mounts ``conversations_path``, so the inner
         server writes the record in place. A runtime without that mount copies
-        it out instead, or the outer catalog stays empty.
+        it out instead, or the outer catalog stays empty. Returns True when
+        the record is current.
         """
+        return True
 
     async def stop_if_idle(
         self,
@@ -647,6 +660,9 @@ class DockerConversationRegistry(ConversationRegistry):
                 token = self._lease_generations.get(conversation_id, 0)
 
             info = await service.get_conversation(conversation_id)
+            # A governed row reaches its terminal status in the outer catalog
+            # only through the policy watch's sync. Until that lands, this
+            # reads running and the runtime is not evicted.
             if info is None or not info.execution_status.is_terminal():
                 continue
 

@@ -489,7 +489,9 @@ class PolicyEventWatcher:
     ledger decides what to produce; the watcher performs the I/O: policy
     events go to the conversation's own agent server, notices go into the
     sandbox file the governance hook reads, and widening commits wait for a
-    turn boundary.
+    turn boundary. The same cycle also pulls each conversation's record into
+    the outer catalog when a turn reaches a terminal state, so the catalog
+    does not stay ``running`` after a run.
     """
 
     def __init__(self, gateway: Any, registry: Any, *, interval: float = 5.0) -> None:
@@ -498,7 +500,8 @@ class PolicyEventWatcher:
         self.interval = interval
         self._ledgers: dict[UUID, PolicyLedger] = {}
         self._primed: set[UUID] = set()
-        self._last_status: dict[UUID, ConversationExecutionStatus] = {}
+        # Record identity (status plus updated_at) of the last confirmed sync.
+        self._last_status: dict[UUID, str] = {}
         self._started = time.time()
         self._task: asyncio.Task[None] | None = None
 
@@ -534,11 +537,15 @@ class PolicyEventWatcher:
 
     async def cycle(self) -> None:
         now = time.time()
-        for conversation_id, container in self.registry.live_governed_conversations():
+        live = self.registry.live_governed_conversations()
+        for conversation_id, container in live:
             try:
                 await self._watch_one(conversation_id, container, now)
             except Exception:
                 logger.exception("Policy watch failed for %s", conversation_id)
+        watched = {conversation_id for conversation_id, _ in live}
+        for conversation_id in set(self._last_status) - watched:
+            self._last_status.pop(conversation_id, None)
 
     async def _watch_one(
         self,
@@ -551,7 +558,10 @@ class PolicyEventWatcher:
         if not await asyncio.to_thread(container.is_running):
             return
 
-        await self._sync_terminal_record(conversation_id, container)
+        snapshot = await self._conversation_snapshot(conversation_id, container)
+        status = snapshot[0] if snapshot is not None else None
+        if snapshot is not None:
+            await self._sync_terminal_record(conversation_id, snapshot[0], snapshot[1])
 
         chunks = await asyncio.to_thread(self.gateway.draft_chunks, sandbox) or []
         records = [
@@ -609,7 +619,9 @@ class PolicyEventWatcher:
                 "\n".join(delivered_notices) + "\n",
             )
         for record in widening:
-            if await self._widen_at_boundary(conversation_id, container, record):
+            if await self._widen_at_boundary(
+                conversation_id, container, record, status
+            ):
                 ledger.widen_decided(record.chunk_id)
 
         if log_lines:
@@ -665,8 +677,17 @@ class PolicyEventWatcher:
         conversation_id: UUID,
         container: ConversationContainer,
         record: PolicyProposalRecord,
+        status: ConversationExecutionStatus | None,
     ) -> bool:
         """Commit the widening only while no agent run holds the turn."""
+        if status is None:
+            logger.warning("Could not read the conversation state; not widening")
+            return False
+        if status == ConversationExecutionStatus.RUNNING:
+            return False
+        # The cycle's snapshot can predate a turn that started while the
+        # policy records were processed; re-read immediately before the
+        # commit, which is the turn-boundary gate.
         if await self._conversation_is_running(conversation_id, container):
             return False
         try:
@@ -686,12 +707,17 @@ class PolicyEventWatcher:
             return False
         return True
 
-    async def _execution_status(
+    async def _conversation_snapshot(
         self,
         conversation_id: UUID,
         container: ConversationContainer,
-    ) -> ConversationExecutionStatus | None:
-        """Read the conversation's live status from its own agent server."""
+    ) -> tuple[ConversationExecutionStatus, str | None] | None:
+        """Read the conversation's live status and record identity.
+
+        ``updated_at`` changes with conversation events, so it identifies the
+        turn that produced the current record. It is None when the payload
+        does not carry the field.
+        """
         try:
             async with self._http_client(container) as client:
                 response = await client.get(
@@ -714,48 +740,54 @@ class PolicyEventWatcher:
         if not isinstance(payload, dict):
             return None
         try:
-            return ConversationExecutionStatus(payload.get("execution_status"))
+            status = ConversationExecutionStatus(payload.get("execution_status"))
         except ValueError:
             return None
+        updated_at = payload.get("updated_at")
+        return status, None if updated_at is None else str(updated_at)
 
     async def _sync_terminal_record(
         self,
         conversation_id: UUID,
-        container: ConversationContainer,
+        status: ConversationExecutionStatus,
+        turn_id: str | None,
     ) -> None:
-        """Pull the runtime record when a run reaches a terminal state.
+        """Pull the runtime record once a turn has ended.
 
         The outer catalog copies the sandbox record only at request
         boundaries. A client that keeps its event stream open crosses none at
-        the end of a turn, so the row would stay ``running``. Refresh on the
-        transition, not on every cycle: a finished conversation must not
-        rewrite its catalog row every few seconds.
+        the end of a turn, so the row would stay ``running``. Deduplicate on
+        the record identity, not on the status: a second turn can start and
+        finish between two polls, so both observations read ``finished``.
+        Advance the identity only after a confirmed copy, so a failed or
+        partial copy is retried on the next cycle.
         """
-        status = await self._execution_status(conversation_id, container)
-        if status is None:
+        if not status.is_terminal():
             return
-        previous = self._last_status.get(conversation_id)
-        if status.is_terminal() and previous != status:
-            try:
-                await self.registry.sync_conversation_record(conversation_id)
-            except Exception:
-                # A catalog refresh must not stop the policy watch; the next
-                # cycle retries while the status stays terminal.
-                logger.warning(
-                    "Could not refresh the catalog record of %s",
-                    conversation_id,
-                    exc_info=True,
-                )
-                return
-        self._last_status[conversation_id] = status
+        identity = f"{status.value}:{turn_id}" if turn_id is not None else status.value
+        if self._last_status.get(conversation_id) == identity:
+            return
+        try:
+            synced = await self.registry.sync_conversation_record(conversation_id)
+        except Exception:
+            # A catalog refresh must not stop the policy watch; the next
+            # cycle retries while the identity stays unsynced.
+            logger.warning(
+                "Could not refresh the catalog record of %s",
+                conversation_id,
+                exc_info=True,
+            )
+            return
+        if synced:
+            self._last_status[conversation_id] = identity
 
     async def _conversation_is_running(
         self,
         conversation_id: UUID,
         container: ConversationContainer,
     ) -> bool:
-        status = await self._execution_status(conversation_id, container)
-        if status is None:
+        snapshot = await self._conversation_snapshot(conversation_id, container)
+        if snapshot is None:
             logger.warning("Could not read the conversation state; not widening")
             return True  # Unknown state: never widen into a live turn.
-        return status == ConversationExecutionStatus.RUNNING
+        return snapshot[0] == ConversationExecutionStatus.RUNNING
