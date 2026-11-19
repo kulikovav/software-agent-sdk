@@ -360,27 +360,22 @@ class PolicyLedger:
         self, record: PolicyProposalRecord, now: float
     ) -> ProposalOutcome:
         """Turn one proposal record into the conversation-visible outcome."""
+        status = record.status
+        if status == "pending" and self._proposal_stale(record, now):
+            status = "expired"
         previous = self.chunk_status.get(record.chunk_id)
-        if previous == record.status:
+        if previous == status:
             # A committed widening needs no re-offer; one the commit still
             # holds at the boundary does, across cycles and restarts alike.
             if (
-                record.status == "approved"
+                status == "approved"
                 and record.review_token
                 and not self.is_applied(record.chunk_id)
             ):
                 return ProposalOutcome(widen_pending=True)
-            # A pending request can age past its TTL while the gateway keeps
-            # it pending: re-check the expiry on every sight of it.
-            if record.status == "pending" and self._proposal_stale(record, now):
-                return self._expired_outcome(record)
             return ProposalOutcome()
-        self.chunk_status[record.chunk_id] = record.status
+        self.chunk_status[record.chunk_id] = status
         self.link_proposal(record)
-
-        status = record.status
-        if status == "pending" and self._proposal_stale(record, now):
-            status = "expired"
 
         if status == "pending":
             outcome = ProposalOutcome()
