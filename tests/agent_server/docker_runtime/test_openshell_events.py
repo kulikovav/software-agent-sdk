@@ -445,6 +445,7 @@ class _FakeRegistry:
         self.leases = 0
         self._state: dict[str, Any] | None = None
         self.saved: list[dict[str, Any]] = []
+        self.synced: list[Any] = []
 
     def sandbox_name(self, conversation_id: Any) -> str:
         return "oh-sandbox"
@@ -453,6 +454,9 @@ class _FakeRegistry:
         if self.container._running:
             return [(self.conversation_id, self.container)]
         return []
+
+    async def sync_conversation_record(self, conversation_id: Any) -> None:
+        self.synced.append(conversation_id)
 
     def acquire_lease(self, conversation_id: Any):
         self.leases += 1
@@ -621,3 +625,46 @@ class TestPolicyEventWatcher:
         assert registry.saved == []
         # No lease is held against an idle runtime.
         assert registry.leases == 0
+
+    @pytest.mark.asyncio
+    async def test_a_terminal_run_refreshes_the_catalog_record_once(self):
+        registry = _FakeRegistry()
+        posts: list[dict[str, Any]] = []
+        watcher = _watcher(registry, posts, execution_status="finished")
+
+        await watcher.cycle()
+        await watcher.cycle()
+
+        # One refresh per transition: a finished conversation must not rewrite
+        # its catalog row on every watch cycle.
+        assert registry.synced == [registry.conversation_id]
+
+    @pytest.mark.asyncio
+    async def test_a_running_conversation_keeps_its_catalog_record(self):
+        registry = _FakeRegistry()
+        posts: list[dict[str, Any]] = []
+        watcher = _watcher(registry, posts, execution_status="running")
+
+        await watcher.cycle()
+
+        assert registry.synced == []
+
+    @pytest.mark.asyncio
+    async def test_each_finished_turn_refreshes_the_catalog_record(self):
+        registry = _FakeRegistry()
+        statuses = iter(["running", "finished", "finished", "running", "finished"])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"execution_status": next(statuses)})
+
+        watcher = PolicyEventWatcher(registry.gateway, registry, interval=5.0)
+        watcher._http_client = lambda container: httpx.AsyncClient(  # type: ignore[method-assign]
+            transport=httpx.MockTransport(handler)
+        )
+
+        for _ in range(5):
+            await watcher.cycle()
+
+        # The first and the second turn each reach a terminal state; the two
+        # cycles that observe the same finished state refresh nothing.
+        assert registry.synced == [registry.conversation_id] * 2

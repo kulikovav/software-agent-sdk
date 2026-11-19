@@ -172,6 +172,23 @@ class DockerConversationRegistry(ConversationRegistry):
         if self._service is not None:
             await self._service.refresh_persisted_conversation(conversation_id)
 
+    async def sync_conversation_record(
+        self,
+        conversation_id: UUID,
+        service: ConversationService | None = None,
+    ) -> None:
+        """Make the outer catalog show the record the runtime ended with.
+
+        This is the single writer for a runtime-owned status record: it copies
+        the runtime's record and then reloads the catalog row. Every caller
+        that observes a runtime state change goes through here, so a catalog
+        row cannot be updated from two different snapshots.
+        """
+        await asyncio.to_thread(self.refresh_catalog_record, conversation_id)
+        target = service or self._service
+        if target is not None:
+            await target.refresh_persisted_conversation(conversation_id)
+
     def resolve_persisted_cipher(self, conversation_id: UUID) -> Cipher:
         """Resolve persisted state without weakening per-runtime isolation.
 

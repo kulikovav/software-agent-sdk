@@ -703,8 +703,7 @@ async def proxy_conversation(
             upstream_path=upstream_path,
         )
     if request.method not in {"GET", "HEAD", "OPTIONS"} and response.status_code < 400:
-        await asyncio.to_thread(registry.refresh_catalog_record, conversation_id)
-        await conversation_service.refresh_persisted_conversation(conversation_id)
+        await registry.sync_conversation_record(conversation_id, conversation_service)
     return response
 
 
@@ -773,10 +772,9 @@ async def _proxy_socket(
         if release is not None:
             release()
         registry.detach_session(conversation_id)
-        # The turn is over: pull the record the runtime ended with, so the
-        # catalog reports the state the conversation actually reached.
-        await asyncio.to_thread(registry.refresh_catalog_record, conversation_id)
-        await conversation_service.refresh_persisted_conversation(conversation_id)
+        # The socket is the end of the client session, not of a turn: pull the
+        # record once more so a turn that finished while attached is visible.
+        await registry.sync_conversation_record(conversation_id, conversation_service)
 
 
 @docker_sockets_router.websocket("/events/{conversation_id}")
