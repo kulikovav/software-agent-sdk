@@ -186,9 +186,8 @@ class DockerConversationRegistry(ConversationRegistry):
 
         Not every catalog write goes through here. The create path calls
         ``copy_conversation_record`` directly and then reloads; release,
-        delete, and idle eviction reload only. Idle eviction reads a governed
-        conversation's terminal status from the outer catalog, so it depends
-        on the policy watch having synced that status first.
+        delete, and idle eviction reload only. A failed copy skips the reload,
+        but a later signature-driven read can still surface the copied half.
         """
         copied = await asyncio.to_thread(self.refresh_catalog_record, conversation_id)
         if not copied:

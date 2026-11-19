@@ -191,8 +191,8 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
     def refresh_catalog_record(self, conversation_id: UUID) -> bool:
         """Copy the sandbox's record so the catalog shows its real state.
 
-        Returns False when the copy is incomplete, so a caller that
-        deduplicates refreshes can retry it.
+        Returns False when a file is missing or the gateway read fails, so a
+        caller that deduplicates refreshes can retry it.
         """
         try:
             return self.copy_conversation_record(conversation_id)
@@ -330,14 +330,16 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
     def copy_conversation_record(self, conversation_id: UUID) -> bool:
         """Copy the inner conversation record into the outer catalog.
 
-        Writes the files that are present and returns False if either is
-        missing, so a partial copy is never reported as current.
+        Writes both files only after both reads succeed, and returns False if
+        ``meta.json`` or ``base_state.json`` is missing, so a partial copy
+        never replaces the catalog.
         """
         sandbox = self._existing_sandbox_name(conversation_id)
         base = f"{_SANDBOX_CONVERSATIONS}/{conversation_id.hex}"
         # The catalog builds each conversation from base_state.json; meta.json
         # only carries the listing fields.
         copied = True
+        staged: list[tuple[Path, Path]] = []
         for name in ("meta.json", "base_state.json"):
             text = self.gateway.read_file(sandbox, f"{base}/{name}")
             if text is None:
@@ -353,5 +355,11 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(f".{target.name}.tmp")
             temporary.write_text(text, encoding="utf-8")
+            staged.append((temporary, target))
+        if not copied:
+            for temporary, _ in staged:
+                temporary.unlink(missing_ok=True)
+            return False
+        for temporary, target in staged:
             os.replace(temporary, target)
-        return copied
+        return True

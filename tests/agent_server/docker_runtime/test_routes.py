@@ -1201,7 +1201,7 @@ async def test_a_governed_start_verifies_the_gateway_ca(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(registry, "get_or_create", AsyncMock(return_value=container))
     monkeypatch.setattr(registry, "acquire_lease", lambda _id: lambda: None)
-    monkeypatch.setattr(registry, "copy_conversation_record", lambda _id: None)
+    monkeypatch.setattr(registry, "copy_conversation_record", lambda _id: True)
     monkeypatch.setattr(
         routers,
         "_prepare_forward",
