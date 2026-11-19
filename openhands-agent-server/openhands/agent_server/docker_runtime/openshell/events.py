@@ -22,6 +22,7 @@ import grpc
 
 from openhands.agent_server.docker_runtime.registry import ConversationContainer
 from openhands.sdk.conversation.request import AgentLaunchAdditions
+from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import PolicyEvent
 from openhands.sdk.hooks import HookConfig
 from openhands.sdk.logger import get_logger
@@ -497,6 +498,7 @@ class PolicyEventWatcher:
         self.interval = interval
         self._ledgers: dict[UUID, PolicyLedger] = {}
         self._primed: set[UUID] = set()
+        self._last_status: dict[UUID, ConversationExecutionStatus] = {}
         self._started = time.time()
         self._task: asyncio.Task[None] | None = None
 
@@ -548,6 +550,8 @@ class PolicyEventWatcher:
         sandbox = self.registry.sandbox_name(conversation_id)
         if not await asyncio.to_thread(container.is_running):
             return
+
+        await self._sync_terminal_record(conversation_id, container)
 
         chunks = await asyncio.to_thread(self.gateway.draft_chunks, sandbox) or []
         records = [
@@ -682,11 +686,12 @@ class PolicyEventWatcher:
             return False
         return True
 
-    async def _conversation_is_running(
+    async def _execution_status(
         self,
         conversation_id: UUID,
         container: ConversationContainer,
-    ) -> bool:
+    ) -> ConversationExecutionStatus | None:
+        """Read the conversation's live status from its own agent server."""
         try:
             async with self._http_client(container) as client:
                 response = await client.get(
@@ -694,8 +699,63 @@ class PolicyEventWatcher:
                     headers={"X-Session-API-Key": container.api_key},
                 )
         except Exception:
-            logger.warning("Could not read the conversation state; not widening")
-            return True
+            logger.debug(
+                "Could not read the conversation state of %s",
+                conversation_id,
+                exc_info=True,
+            )
+            return None
         if response.is_error:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        try:
+            return ConversationExecutionStatus(payload.get("execution_status"))
+        except ValueError:
+            return None
+
+    async def _sync_terminal_record(
+        self,
+        conversation_id: UUID,
+        container: ConversationContainer,
+    ) -> None:
+        """Pull the runtime record when a run reaches a terminal state.
+
+        The outer catalog copies the sandbox record only at request
+        boundaries. A client that keeps its event stream open crosses none at
+        the end of a turn, so the row would stay ``running``. Refresh on the
+        transition, not on every cycle: a finished conversation must not
+        rewrite its catalog row every few seconds.
+        """
+        status = await self._execution_status(conversation_id, container)
+        if status is None:
+            return
+        previous = self._last_status.get(conversation_id)
+        if status.is_terminal() and previous != status:
+            try:
+                await self.registry.sync_conversation_record(conversation_id)
+            except Exception:
+                # A catalog refresh must not stop the policy watch; the next
+                # cycle retries while the status stays terminal.
+                logger.warning(
+                    "Could not refresh the catalog record of %s",
+                    conversation_id,
+                    exc_info=True,
+                )
+                return
+        self._last_status[conversation_id] = status
+
+    async def _conversation_is_running(
+        self,
+        conversation_id: UUID,
+        container: ConversationContainer,
+    ) -> bool:
+        status = await self._execution_status(conversation_id, container)
+        if status is None:
+            logger.warning("Could not read the conversation state; not widening")
             return True  # Unknown state: never widen into a live turn.
-        return response.json().get("execution_status") == "running"
+        return status == ConversationExecutionStatus.RUNNING

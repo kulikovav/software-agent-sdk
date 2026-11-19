@@ -1,4 +1,5 @@
 import asyncio
+import json
 from uuid import uuid4
 
 import grpc
@@ -8,14 +9,22 @@ from openshell._proto import openshell_pb2 as pb, sandbox_pb2
 from pydantic import SecretStr
 
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
+from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.docker_runtime.openshell.client import OpenShellGateway
 from openhands.agent_server.docker_runtime.openshell.registry import (
     OpenShellContainer,
     OpenShellConversationRegistry,
 )
 from openhands.agent_server.docker_runtime.registry import RuntimeArchivedError
-from openhands.agent_server.models import ConversationRuntimeStatus
+from openhands.agent_server.models import (
+    ConversationRuntimeStatus,
+    StartConversationRequest,
+)
+from openhands.sdk import LLM, Agent
 from openhands.sdk.conversation.request import ConversationContainerOptions
+from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.security.confirmation_policy import NeverConfirm
+from openhands.sdk.workspace import LocalWorkspace
 
 
 def make_sandbox(
@@ -487,6 +496,70 @@ def test_refresh_catalog_record_survives_a_gateway_failure(tmp_path, monkeypatch
     monkeypatch.setattr(gateway, "read_file", gateway_down)
 
     registry.refresh_catalog_record(uuid4())
+
+
+@pytest.mark.asyncio
+async def test_sync_conversation_record_updates_the_catalog_list_and_detail(tmp_path):
+    """A finished turn must reach both the catalog list and the detail record."""
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    conversations_dir = registry.config.conversations_path
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace)),
+        confirmation_policy=NeverConfirm(),
+    )
+    async with ConversationService(
+        conversations_dir=conversations_dir, cipher=registry.provisioning.cipher
+    ) as creator:
+        info, _ = await creator.start_conversation(request)
+
+    conversation_id = info.id
+    outer_dir = conversations_dir / conversation_id.hex
+    persisted = json.loads((outer_dir / "base_state.json").read_text())
+
+    # The sandbox owns the live record; prepare both sides from the same one.
+    base = f"/sandbox/conversations/{conversation_id.hex}"
+    gateway.files[f"{base}/meta.json"] = (outer_dir / "meta.json").read_text()
+    gateway.files[f"{base}/base_state.json"] = json.dumps(
+        {**persisted, "execution_status": "finished"}
+    )
+
+    service = ConversationService(
+        conversations_dir=conversations_dir,
+        cipher=registry.provisioning.cipher,
+    )
+    registry.configure_service(service)
+    async with service:
+        # Recreate the stale catalog row the outer server held while the run
+        # finished, after the service loaded it so startup recovery ignores it.
+        (outer_dir / "base_state.json").write_text(
+            json.dumps({**persisted, "execution_status": "running"})
+        )
+        stale_detail = await service.get_conversation(conversation_id)
+        stale_page = await service.search_conversations()
+        assert stale_detail is not None
+        assert stale_detail.execution_status == ConversationExecutionStatus.RUNNING
+        assert (
+            next(
+                item for item in stale_page.items if item.id == conversation_id
+            ).execution_status
+            == ConversationExecutionStatus.RUNNING
+        )
+
+        await registry.sync_conversation_record(conversation_id)
+
+        detail = await service.get_conversation(conversation_id)
+        page = await service.search_conversations()
+
+    assert detail is not None
+    assert detail.execution_status == ConversationExecutionStatus.FINISHED
+    assert (
+        next(item for item in page.items if item.id == conversation_id).execution_status
+        == ConversationExecutionStatus.FINISHED
+    )
 
 
 def test_delete_runtime_deletes_the_sandbox(tmp_path):
