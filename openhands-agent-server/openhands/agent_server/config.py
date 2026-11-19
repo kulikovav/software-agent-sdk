@@ -434,6 +434,20 @@ class Config(BaseModel):
             "Unset selects the CLI's active gateway."
         ),
     )
+    openshell_policy: str | None = Field(
+        default="governed-sandbox.yaml",
+        description=(
+            "OpenShell policy applied to every governed sandbox that does not "
+            "name its own. A bare name resolves under `openshell_policy_dir`; "
+            "an absolute path is used as-is. Unset leaves the gateway default."
+        ),
+    )
+    openshell_policy_dir: str = Field(
+        default="/var/lib/openshell/data/policies",
+        description=(
+            "Directory that holds the repository-owned OpenShell policy files."
+        ),
+    )
     openshell_provider: str | None = Field(
         default=None,
         description=(

@@ -164,9 +164,11 @@ class AgentLaunchAdditions(BaseModel):
 class ConversationContainerOptions(BaseModel):
     """Resources for a conversation's container.
 
-    Only the Docker runtime applies them, when it creates the conversation's
-    container; a local conversation ignores them. An unset field keeps the
-    server's configured limit; a set one replaces it and is not capped by it.
+    The Docker runtime applies the resource limits when it creates the
+    conversation's container; the OpenShell runtime applies ``policy`` when it
+    creates the governed sandbox. A local conversation ignores them. An unset
+    limit keeps the server's configured limit; a set one replaces it and is not
+    capped by it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -192,6 +194,14 @@ class ConversationContainerOptions(BaseModel):
         description=(
             "False turns the browser off. True cannot turn it on for an image "
             "without one."
+        ),
+    )
+    policy: str | None = Field(
+        default=None,
+        description=(
+            "OpenShell sandbox policy for this conversation. A bare name "
+            "resolves under the server's `openshell_policy_dir`; an absolute "
+            "path is used as-is. Unset uses the server's `openshell_policy`."
         ),
     )
 
