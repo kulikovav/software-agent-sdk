@@ -188,16 +188,21 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
 
         router.include_router(docker_conversation_router)
 
-    def refresh_catalog_record(self, conversation_id: UUID) -> None:
-        """Copy the sandbox's record so the catalog shows its real state."""
+    def refresh_catalog_record(self, conversation_id: UUID) -> bool:
+        """Copy the sandbox's record so the catalog shows its real state.
+
+        Returns False when the copy is incomplete, so a caller that
+        deduplicates refreshes can retry it.
+        """
         try:
-            self.copy_conversation_record(conversation_id)
+            return self.copy_conversation_record(conversation_id)
         except Exception:
-            logger.debug(
+            logger.warning(
                 "Could not refresh the catalog record for %s",
                 conversation_id,
                 exc_info=True,
             )
+            return False
 
     def _sandbox_policy(
         self, identity: RuntimeIdentity
@@ -322,12 +327,17 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
     def delete_runtime(self, conversation_id: UUID) -> None:
         self.gateway.delete(self._existing_sandbox_name(conversation_id))
 
-    def copy_conversation_record(self, conversation_id: UUID) -> None:
-        """Copy the inner conversation record into the outer catalog."""
+    def copy_conversation_record(self, conversation_id: UUID) -> bool:
+        """Copy the inner conversation record into the outer catalog.
+
+        Writes the files that are present and returns False if either is
+        missing, so a partial copy is never reported as current.
+        """
         sandbox = self._existing_sandbox_name(conversation_id)
         base = f"{_SANDBOX_CONVERSATIONS}/{conversation_id.hex}"
         # The catalog builds each conversation from base_state.json; meta.json
         # only carries the listing fields.
+        copied = True
         for name in ("meta.json", "base_state.json"):
             text = self.gateway.read_file(sandbox, f"{base}/{name}")
             if text is None:
@@ -337,9 +347,11 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
                     name,
                     sandbox,
                 )
+                copied = False
                 continue
             target = self.conversation_dir(conversation_id) / name
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(f".{target.name}.tmp")
             temporary.write_text(text, encoding="utf-8")
             os.replace(temporary, target)
+        return copied

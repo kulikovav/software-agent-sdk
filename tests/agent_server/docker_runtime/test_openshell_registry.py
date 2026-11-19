@@ -481,7 +481,7 @@ def test_refresh_catalog_record_replaces_a_stale_status(tmp_path):
     target.parent.mkdir(parents=True)
     target.write_text('{"execution_status": "error"}', encoding="utf-8")
 
-    registry.refresh_catalog_record(conversation_id)
+    assert registry.refresh_catalog_record(conversation_id) is True
 
     assert target.read_text(encoding="utf-8") == '{"execution_status": "finished"}'
 
@@ -495,7 +495,27 @@ def test_refresh_catalog_record_survives_a_gateway_failure(tmp_path, monkeypatch
 
     monkeypatch.setattr(gateway, "read_file", gateway_down)
 
-    registry.refresh_catalog_record(uuid4())
+    assert registry.refresh_catalog_record(uuid4()) is False
+
+
+@pytest.mark.asyncio
+async def test_a_partial_catalog_copy_is_reported_and_retried(tmp_path):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    conversation_id = uuid4()
+    base = f"/sandbox/conversations/{conversation_id.hex}"
+    gateway.files[f"{base}/meta.json"] = '{"id": "conversation"}'
+    target = registry.conversation_dir(conversation_id) / "base_state.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"execution_status": "running"}', encoding="utf-8")
+
+    # base_state.json is missing in the sandbox: the copy is partial.
+    assert await registry.sync_conversation_record(conversation_id) is False
+    assert target.read_text(encoding="utf-8") == '{"execution_status": "running"}'
+
+    gateway.files[f"{base}/base_state.json"] = '{"execution_status": "finished"}'
+    assert await registry.sync_conversation_record(conversation_id) is True
+    assert target.read_text(encoding="utf-8") == '{"execution_status": "finished"}'
 
 
 @pytest.mark.asyncio
@@ -549,7 +569,7 @@ async def test_sync_conversation_record_updates_the_catalog_list_and_detail(tmp_
             == ConversationExecutionStatus.RUNNING
         )
 
-        await registry.sync_conversation_record(conversation_id)
+        assert await registry.sync_conversation_record(conversation_id) is True
 
         detail = await service.get_conversation(conversation_id)
         page = await service.search_conversations()
