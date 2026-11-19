@@ -1,6 +1,6 @@
 import asyncio
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import grpc
 import pytest
@@ -516,6 +516,29 @@ async def test_a_partial_catalog_copy_is_reported_and_retried(tmp_path):
     gateway.files[f"{base}/base_state.json"] = '{"execution_status": "finished"}'
     assert await registry.sync_conversation_record(conversation_id) is True
     assert target.read_text(encoding="utf-8") == '{"execution_status": "finished"}'
+
+
+@pytest.mark.asyncio
+async def test_a_partial_copy_does_not_reload_the_catalog(tmp_path):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    conversation_id = uuid4()
+    base = f"/sandbox/conversations/{conversation_id.hex}"
+    gateway.files[f"{base}/meta.json"] = '{"id": "conversation"}'
+
+    calls: list[UUID] = []
+
+    class _Service:
+        async def refresh_persisted_conversation(self, requested_id: UUID) -> None:
+            calls.append(requested_id)
+
+    registry.configure_service(_Service())
+    assert await registry.sync_conversation_record(conversation_id) is False
+    assert calls == []
+
+    gateway.files[f"{base}/base_state.json"] = '{"execution_status": "finished"}'
+    assert await registry.sync_conversation_record(conversation_id) is True
+    assert calls == [conversation_id]
 
 
 @pytest.mark.asyncio

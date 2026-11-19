@@ -494,14 +494,24 @@ class PolicyEventWatcher:
     does not stay ``running`` after a run.
     """
 
-    def __init__(self, gateway: Any, registry: Any, *, interval: float = 5.0) -> None:
+    def __init__(
+        self,
+        gateway: Any,
+        registry: Any,
+        *,
+        interval: float = 5.0,
+        sync_retry_interval: float = 60.0,
+    ) -> None:
         self.gateway = gateway
         self.registry = registry
         self.interval = interval
+        self.sync_retry_interval = sync_retry_interval
         self._ledgers: dict[UUID, PolicyLedger] = {}
         self._primed: set[UUID] = set()
         # Record identity (status plus updated_at) of the last confirmed sync.
-        self._last_status: dict[UUID, str] = {}
+        self._last_synced_identity: dict[UUID, str] = {}
+        # Last failed sync attempt, so a permanently incomplete copy backs off.
+        self._sync_attempts: dict[UUID, float] = {}
         self._started = time.time()
         self._task: asyncio.Task[None] | None = None
 
@@ -544,8 +554,16 @@ class PolicyEventWatcher:
             except Exception:
                 logger.exception("Policy watch failed for %s", conversation_id)
         watched = {conversation_id for conversation_id, _ in live}
-        for conversation_id in set(self._last_status) - watched:
-            self._last_status.pop(conversation_id, None)
+        for conversation_id in (
+            set(self._last_synced_identity)
+            | set(self._ledgers)
+            | self._primed
+            | set(self._sync_attempts)
+        ) - watched:
+            self._last_synced_identity.pop(conversation_id, None)
+            self._ledgers.pop(conversation_id, None)
+            self._primed.discard(conversation_id)
+            self._sync_attempts.pop(conversation_id, None)
 
     async def _watch_one(
         self,
@@ -561,7 +579,9 @@ class PolicyEventWatcher:
         snapshot = await self._conversation_snapshot(conversation_id, container)
         status = snapshot[0] if snapshot is not None else None
         if snapshot is not None:
-            await self._sync_terminal_record(conversation_id, snapshot[0], snapshot[1])
+            await self._sync_terminal_record(
+                conversation_id, snapshot[0], snapshot[1], now
+            )
 
         chunks = await asyncio.to_thread(self.gateway.draft_chunks, sandbox) or []
         records = [
@@ -750,7 +770,8 @@ class PolicyEventWatcher:
         self,
         conversation_id: UUID,
         status: ConversationExecutionStatus,
-        turn_id: str | None,
+        updated_at: str | None,
+        now: float,
     ) -> None:
         """Pull the runtime record once a turn has ended.
 
@@ -758,20 +779,28 @@ class PolicyEventWatcher:
         boundaries. A client that keeps its event stream open crosses none at
         the end of a turn, so the row would stay ``running``. Deduplicate on
         the record identity, not on the status: a second turn can start and
-        finish between two polls, so both observations read ``finished``.
+        finish between two polls, so both observations read ``finished``. When
+        the payload has no ``updated_at``, the identity falls back to the
+        status alone, so such a payload can still miss a quick second turn.
         Advance the identity only after a confirmed copy, so a failed or
-        partial copy is retried on the next cycle.
+        partial copy is retried after ``sync_retry_interval``.
         """
         if not status.is_terminal():
             return
-        identity = f"{status.value}:{turn_id}" if turn_id is not None else status.value
-        if self._last_status.get(conversation_id) == identity:
+        identity = (
+            f"{status.value}:{updated_at}" if updated_at is not None else status.value
+        )
+        if self._last_synced_identity.get(conversation_id) == identity:
             return
+        last_attempt = self._sync_attempts.get(conversation_id, 0.0)
+        if now - last_attempt < self.sync_retry_interval:
+            return
+        self._sync_attempts[conversation_id] = now
         try:
             synced = await self.registry.sync_conversation_record(conversation_id)
         except Exception:
             # A catalog refresh must not stop the policy watch; the next
-            # cycle retries while the identity stays unsynced.
+            # attempt waits for the retry interval.
             logger.warning(
                 "Could not refresh the catalog record of %s",
                 conversation_id,
@@ -779,7 +808,8 @@ class PolicyEventWatcher:
             )
             return
         if synced:
-            self._last_status[conversation_id] = identity
+            self._last_synced_identity[conversation_id] = identity
+            self._sync_attempts.pop(conversation_id, None)
 
     async def _conversation_is_running(
         self,
@@ -788,6 +818,8 @@ class PolicyEventWatcher:
     ) -> bool:
         snapshot = await self._conversation_snapshot(conversation_id, container)
         if snapshot is None:
-            logger.warning("Could not read the conversation state; not widening")
-            return True  # Unknown state: never widen into a live turn.
+            logger.warning(
+                "Could not read the conversation state; treating it as active"
+            )
+            return True  # Defensive fallback: an unknown state must never widen.
         return snapshot[0] == ConversationExecutionStatus.RUNNING

@@ -367,7 +367,9 @@ def _watcher(
     posts: list[dict[str, Any]],
     execution_status: str = "idle",
 ) -> PolicyEventWatcher:
-    watcher = PolicyEventWatcher(registry.gateway, registry, interval=5.0)
+    watcher = PolicyEventWatcher(
+        registry.gateway, registry, interval=5.0, sync_retry_interval=0.0
+    )
     transport = _transport(posts, execution_status)
     watcher._http_client = lambda container: httpx.AsyncClient(  # type: ignore[method-assign]
         transport=transport
@@ -402,7 +404,9 @@ def _transport(
 
 
 def _failing_watcher(registry: "_FakeRegistry") -> PolicyEventWatcher:
-    watcher = PolicyEventWatcher(registry.gateway, registry, interval=5.0)
+    watcher = PolicyEventWatcher(
+        registry.gateway, registry, interval=5.0, sync_retry_interval=0.0
+    )
     watcher._http_client = lambda container: httpx.AsyncClient(  # type: ignore[method-assign]
         transport=_transport([], fail_posts=True)
     )
@@ -677,7 +681,9 @@ class TestPolicyEventWatcher:
                 200, json={"execution_status": status, "updated_at": updated_at}
             )
 
-        watcher = PolicyEventWatcher(registry.gateway, registry, interval=5.0)
+        watcher = PolicyEventWatcher(
+            registry.gateway, registry, interval=5.0, sync_retry_interval=0.0
+        )
         watcher._http_client = lambda container: httpx.AsyncClient(  # type: ignore[method-assign]
             transport=httpx.MockTransport(handler)
         )
@@ -705,7 +711,9 @@ class TestPolicyEventWatcher:
                 200, json={"execution_status": status, "updated_at": updated_at}
             )
 
-        watcher = PolicyEventWatcher(registry.gateway, registry, interval=5.0)
+        watcher = PolicyEventWatcher(
+            registry.gateway, registry, interval=5.0, sync_retry_interval=0.0
+        )
         watcher._http_client = lambda container: httpx.AsyncClient(  # type: ignore[method-assign]
             transport=httpx.MockTransport(handler)
         )
@@ -727,10 +735,34 @@ class TestPolicyEventWatcher:
         await watcher.cycle()
 
         assert registry.synced == [registry.conversation_id]
-        # The failed copy must not mark the terminal record as synced.
-        assert registry.conversation_id not in watcher._last_status
 
         await watcher.cycle()
 
         assert registry.synced == [registry.conversation_id] * 2
-        assert registry.conversation_id in watcher._last_status
+
+        await watcher.cycle()
+
+        # The confirmed identity deduplicates later cycles.
+        assert registry.synced == [registry.conversation_id] * 2
+
+    @pytest.mark.asyncio
+    async def test_a_payload_without_updated_at_falls_back_to_status(self):
+        registry = _FakeRegistry()
+        statuses = iter(["finished", "finished"])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"execution_status": next(statuses)})
+
+        watcher = PolicyEventWatcher(
+            registry.gateway, registry, interval=5.0, sync_retry_interval=0.0
+        )
+        watcher._http_client = lambda container: httpx.AsyncClient(  # type: ignore[method-assign]
+            transport=httpx.MockTransport(handler)
+        )
+
+        await watcher.cycle()
+        await watcher.cycle()
+
+        # Without updated_at the identity degrades to the status, so a second
+        # turn that completes between polls is not detected.
+        assert registry.synced == [registry.conversation_id]
