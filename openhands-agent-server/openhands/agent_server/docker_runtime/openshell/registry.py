@@ -5,15 +5,19 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import grpc
 from fastapi import APIRouter
-from openshell._proto import openshell_pb2 as pb
+from openshell._proto import openshell_pb2 as pb, sandbox_pb2
 
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
-from openhands.agent_server.docker_runtime.openshell.client import OpenShellGateway
+from openhands.agent_server.docker_runtime.openshell.client import (
+    OpenShellGateway,
+    load_sandbox_policy,
+)
 from openhands.agent_server.docker_runtime.openshell.events import PolicyEventWatcher
 from openhands.agent_server.docker_runtime.provisioning import RuntimeIdentity
 from openhands.agent_server.docker_runtime.registry import (
@@ -195,6 +199,19 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
                 exc_info=True,
             )
 
+    def _sandbox_policy(
+        self, identity: RuntimeIdentity
+    ) -> sandbox_pb2.SandboxPolicy | None:
+        """The policy selected for this conversation, or the server default."""
+        name = identity.container.policy if identity.container else None
+        name = name or self.config.openshell_policy
+        if not name:
+            return None
+        path = Path(name)
+        if not path.is_absolute():
+            path = Path(self.config.openshell_policy_dir) / name
+        return load_sandbox_policy(path)
+
     def _build_container(self, conversation_id: UUID) -> ConversationContainer:
         identity = self.provisioning.load(conversation_id)
         name = self.sandbox_name(conversation_id)
@@ -230,6 +247,7 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
                 },
                 provider=self.config.openshell_provider,
                 expose_port=_AGENT_PORT,
+                policy=self._sandbox_policy(identity),
             )
             created = True
         elif sandbox.phase != pb.SANDBOX_PHASE_READY:

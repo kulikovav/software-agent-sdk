@@ -4,7 +4,7 @@ from uuid import uuid4
 import grpc
 import pytest
 from openshell import SandboxRef, SandboxStatusRef
-from openshell._proto import openshell_pb2 as pb
+from openshell._proto import openshell_pb2 as pb, sandbox_pb2
 from pydantic import SecretStr
 
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
@@ -15,6 +15,7 @@ from openhands.agent_server.docker_runtime.openshell.registry import (
 )
 from openhands.agent_server.docker_runtime.registry import RuntimeArchivedError
 from openhands.agent_server.models import ConversationRuntimeStatus
+from openhands.sdk.conversation.request import ConversationContainerOptions
 
 
 def make_sandbox(
@@ -35,7 +36,7 @@ class FakeGateway(OpenShellGateway):
         self.service_port = None
         self.workspace = "default"
         self.existing = existing
-        self.found = None
+        self.found: SandboxRef | None = None
         self.created = []
         self.deleted = []
         self.started = []
@@ -76,15 +77,54 @@ class FakeGateway(OpenShellGateway):
         self.closed = True
 
 
-def make_registry(tmp_path, gateway):
+def make_registry(tmp_path, gateway, policy: str | None = "governed-sandbox.yaml"):
+    policy_dir = tmp_path / "policies"
+    policy_dir.mkdir(exist_ok=True)
+    (policy_dir / "governed-sandbox.yaml").write_text(
+        """
+version: 1
+filesystem_policy:
+  read_write:
+    - /dev/pts
+    - /sandbox
+network_policies:
+  test_rule:
+    endpoints:
+      - host: example.invalid
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+        rules:
+          - allow:
+              method: "*"
+              path: /v1/**
+    binaries:
+      - path: /usr/bin/curl
+"""
+    )
+    (policy_dir / "wide-egress.yaml").write_text(
+        """
+version: 1
+filesystem_policy:
+  read_write:
+    - /tmp
+"""
+    )
     config = Config(
         conversation_runtime="openshell",
         conversations_path=tmp_path / "conversations",
         workspace_path=tmp_path / "workspaces",
         openshell_tls_ca=str(tmp_path / "ca.crt"),
+        openshell_policy=policy,
+        openshell_policy_dir=str(policy_dir),
         secret_key=SecretStr("outer-key"),
     )
     return OpenShellConversationRegistry(config, gateway=gateway)
+
+
+def test_the_server_defaults_to_the_governed_sandbox_policy():
+    assert Config().openshell_policy == "governed-sandbox.yaml"
 
 
 def test_build_container_creates_a_sandbox_and_records_its_url(tmp_path, monkeypatch):
@@ -105,6 +145,11 @@ def test_build_container_creates_a_sandbox_and_records_its_url(tmp_path, monkeyp
     assert len(create["name"]) <= 19
     assert create["labels"]["openhands.conversation"] == conversation_id.hex
     assert create["expose_port"] == 8000
+    policy = create["policy"]
+    assert list(policy.filesystem.read_write) == ["/dev/pts", "/sandbox"]
+    endpoint = policy.network_policies["test_rule"].endpoints[0]
+    assert endpoint.enforcement == sandbox_pb2.NETWORK_ENFORCEMENT_MODE_ENFORCE
+    assert endpoint.access == sandbox_pb2.NETWORK_ACCESS_PRESET_FULL
     # The image's frozen ``openhands-agent-server`` binary embeds upstream code,
     # so it cannot serve a route this fork installs beside it. Start the module.
     assert create["command"][:4] == ["python", "-m", "openhands.agent_server", "--host"]
@@ -117,6 +162,38 @@ def test_build_container_creates_a_sandbox_and_records_its_url(tmp_path, monkeyp
     )
 
     assert registry.provisioning.load(conversation_id).service_url == container.host
+
+
+def test_a_conversation_can_select_another_policy(tmp_path, monkeypatch):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway)
+    monkeypatch.setattr(registry, "_wait_until_ready", lambda container: None)
+    conversation_id = uuid4()
+    identity = registry.provisioning.create(conversation_id)
+    registry.provisioning.save(
+        identity.model_copy(
+            update={
+                "container": ConversationContainerOptions(policy="wide-egress.yaml")
+            }
+        )
+    )
+
+    registry._build_container(conversation_id)
+
+    policy = gateway.created[0]["policy"]
+    assert list(policy.filesystem.read_write) == ["/tmp"]
+
+
+def test_no_policy_is_sent_when_both_selections_are_unset(tmp_path, monkeypatch):
+    gateway = FakeGateway()
+    registry = make_registry(tmp_path, gateway, policy=None)
+    monkeypatch.setattr(registry, "_wait_until_ready", lambda container: None)
+    conversation_id = uuid4()
+    registry.provisioning.create(conversation_id)
+
+    registry._build_container(conversation_id)
+
+    assert gateway.created[0]["policy"] is None
 
 
 def test_build_container_adopts_the_sandbox_by_name(tmp_path, monkeypatch):

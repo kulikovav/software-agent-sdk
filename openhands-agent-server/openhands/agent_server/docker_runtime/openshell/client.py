@@ -5,12 +5,15 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import grpc
+import yaml
+from google.protobuf import json_format
 from openshell import SandboxClient, SandboxRef, ServiceExposure
-from openshell._proto import datamodel_pb2, openshell_pb2 as pb
+from openshell._proto import datamodel_pb2, openshell_pb2 as pb, sandbox_pb2
 
 from openhands.agent_server.docker_runtime.openshell.events import (
     NOTICES_DIR,
@@ -25,6 +28,62 @@ logger = get_logger(__name__)
 # governance loop calls the pinned gRPC stub directly.
 _LOG_LINES = 500
 _POLICY_TIMEOUT_SECONDS = 30.0
+
+# The policy file uses the CLI's YAML vocabulary. The proto uses the field name
+# ``filesystem`` and enum names, so the loader translates only those values.
+_ENFORCEMENT = {
+    "enforce": "NETWORK_ENFORCEMENT_MODE_ENFORCE",
+    "audit": "NETWORK_ENFORCEMENT_MODE_AUDIT",
+}
+_ACCESS = {
+    "read-only": "NETWORK_ACCESS_PRESET_READ_ONLY",
+    "read-write": "NETWORK_ACCESS_PRESET_READ_WRITE",
+    "full": "NETWORK_ACCESS_PRESET_FULL",
+}
+_TLS = {
+    "skip": "NETWORK_TLS_MODE_SKIP",
+    "terminate": "NETWORK_TLS_MODE_TERMINATE",
+    "passthrough": "NETWORK_TLS_MODE_PASSTHROUGH",
+}
+
+
+def load_sandbox_policy(path: str | Path) -> sandbox_pb2.SandboxPolicy:
+    """Read a repository policy file into the protobuf the gateway accepts."""
+    source = Path(path)
+    try:
+        data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"Cannot read OpenShell policy {source}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"OpenShell policy {source} is not valid YAML: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"OpenShell policy {source} is not a mapping")
+    if "filesystem_policy" in data:
+        data["filesystem"] = data.pop("filesystem_policy")
+    for name, rule in (data.get("network_policies") or {}).items():
+        rule.setdefault("name", name)
+        for endpoint in rule.get("endpoints", []):
+            for key, values in (
+                ("enforcement", _ENFORCEMENT),
+                ("access", _ACCESS),
+                ("tls", _TLS),
+            ):
+                if key not in endpoint:
+                    continue
+                value = endpoint[key]
+                if key == "tls" and value in ("", None):
+                    endpoint.pop(key)
+                elif value not in values:
+                    raise ValueError(
+                        f"OpenShell policy {source} has an unsupported "
+                        f"{key} value {value!r}"
+                    )
+                else:
+                    endpoint[key] = values[value]
+    try:
+        return json_format.ParseDict(data, sandbox_pb2.SandboxPolicy())
+    except Exception as exc:
+        raise ValueError(f"OpenShell policy {source} is invalid: {exc}") from exc
 
 
 class OpenShellGateway:
@@ -75,12 +134,15 @@ class OpenShellGateway:
         labels: Mapping[str, str],
         provider: str | None,
         expose_port: int,
+        policy: sandbox_pb2.SandboxPolicy | None = None,
     ) -> SandboxRef:
         spec = pb.SandboxSpec(
             template=pb.SandboxTemplate(image=image),
             command=list(command),
             environment=dict(environment),
         )
+        if policy is not None:
+            spec.policy.CopyFrom(policy)
         if provider:
             spec.providers.append(provider)
         try:

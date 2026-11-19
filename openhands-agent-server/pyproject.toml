@@ -16,6 +16,7 @@ dependencies = [
   "openshell==0.1.7",  # SDK bindings match the pinned gateway 0.1.7; bump both together
   "openai>=2.33.0,<3",
   "pydantic>=2.14.3",
+  "pyyaml>=6.0.3",
   "sqlalchemy>=2.1.9",
   "uvicorn>=0.54.0",
   "websockets>=12",
