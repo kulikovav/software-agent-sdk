@@ -286,6 +286,20 @@ class TestPolicyLedgerProposals:
         assert later.event is not None and later.event.status == "expired"
         assert later.notice is not None
 
+    def test_an_expired_proposal_is_announced_once(self):
+        record = _proposal(created_time=_fake_timestamp(0.0))
+        ledger = PolicyLedger()
+
+        ledger.process_proposal(record, now=1.0)
+        expired = ledger.process_proposal(record, now=PROPOSAL_TTL_SECONDS + 2.0)
+        again = ledger.process_proposal(record, now=PROPOSAL_TTL_SECONDS + 7.0)
+
+        assert expired.event is not None and expired.event.status == "expired"
+        # The gateway keeps a stale request pending; the watch must not re-post
+        # the same expiry on every cycle.
+        assert again.event is None
+        assert again.notice is None
+
     def test_prime_silently_records_preexisting_decisions(self):
         decided_before = _proposal(
             status="approved", decided_time=_fake_timestamp(50.0)
