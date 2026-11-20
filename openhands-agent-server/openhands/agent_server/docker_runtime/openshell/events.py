@@ -12,6 +12,7 @@ actions and pass through immediately.
 from __future__ import annotations
 
 import asyncio
+import enum
 import re
 import time
 from collections.abc import Iterable
@@ -55,6 +56,28 @@ DENIAL_EVENT_WINDOW_SECONDS = 3600.0
 # A destination denied again within this window updates nothing: the denial
 # of the same destination is already on the transcript.
 DENIAL_DEDUP_SECONDS = 300.0
+
+# gRPC codes that mean a widening commit can never succeed, so the chunk is
+# recorded failed instead of re-offered. Anything else (transient codes such
+# as UNAVAILABLE or INTERNAL, and non-gRPC errors) is retried on later cycles.
+_PERMANENT_COMMIT_CODES = frozenset(
+    {
+        grpc.StatusCode.INVALID_ARGUMENT,
+        grpc.StatusCode.FAILED_PRECONDITION,
+        grpc.StatusCode.PERMISSION_DENIED,
+        grpc.StatusCode.NOT_FOUND,
+        grpc.StatusCode.UNIMPLEMENTED,
+    }
+)
+
+
+class CommitOutcome(enum.Enum):
+    """The result of one widening-commit attempt."""
+
+    COMMITTED = "committed"
+    RETRY = "retry"
+    FAILED = "failed"
+
 
 # The sandbox working directory; the governed registry sets it as HOME.
 NOTICES_PATH = "/sandbox/.policy/notices"
@@ -215,6 +238,17 @@ class PolicyProposalRecord:
     decided_epoch: float | None
     requested_scope: str
 
+    @property
+    def auto_approved(self) -> bool:
+        """Whether the gateway approved this chunk without a human decision.
+
+        The gateway's ``DraftPolicyChunk`` proto carries no auto/human flag, so
+        an empty review token is the inferred marker of an auto approval. The
+        premise fails in one direction: a human approval that carries no token
+        is labelled automatic and skips the turn-boundary gate.
+        """
+        return not self.review_token
+
     def provenance(self) -> dict[str, str]:
         """Provenance labels safe for the event stream and the state file.
 
@@ -302,6 +336,7 @@ class PolicyLedger:
         self.log_cursor: float | None = state.get("log_cursor")
         self.chunk_status: dict[str, str] = dict(state.get("chunk_status") or {})
         self.applied: set[str] = set(state.get("applied") or [])
+        self.failed: set[str] = set(state.get("failed") or [])
         self.denial_posted: dict[str, float] = dict(state.get("denial_posted") or {})
         self.destinations: dict[str, str] = dict(state.get("destinations") or {})
         self.proposal_meta: dict[str, dict[str, str]] = dict(
@@ -318,6 +353,7 @@ class PolicyLedger:
             "log_cursor": self.log_cursor,
             "chunk_status": status,
             "applied": sorted(self.applied),
+            "failed": sorted(self.failed),
             "denial_posted": dict(list(self.denial_posted.items())[-500:]),
             "destinations": self.destinations,
             "proposal_meta": self.proposal_meta,
@@ -387,9 +423,13 @@ class PolicyLedger:
             status = "expired"
         previous = self.chunk_status.get(record.chunk_id)
         if previous == status:
-            # A committed widening needs no re-offer; one the commit still
-            # holds at the boundary does, across cycles and restarts alike.
-            if status == "approved" and not self.is_applied(record.chunk_id):
+            # An uncommitted widening is re-offered on every later cycle and
+            # after a restart; a failed chunk is never re-offered.
+            if (
+                status == "approved"
+                and not self.is_applied(record.chunk_id)
+                and not self.is_failed(record.chunk_id)
+            ):
                 return ProposalOutcome(widen_pending=True)
             return ProposalOutcome()
         self.chunk_status[record.chunk_id] = status
@@ -412,20 +452,14 @@ class PolicyLedger:
         if status == "expired":
             return self._expired_outcome(record)
         if status == "approved":
-            # An empty review token identifies a gateway auto-approval
-            # (unverified gateway-side premise: the DraftPolicyChunk proto has
-            # no auto/human flag). An auto approval must apply in-turn, since
-            # a one-turn task never crosses a turn boundary; a human approval
-            # can wait for the operator's next turn.
+            # See ``PolicyProposalRecord.auto_approved`` for how the auto
+            # marker is inferred and where that inference can be wrong.
+            auto = record.auto_approved
             return ProposalOutcome(
                 event=PolicyEvent(
                     status="approved",
                     destination=record.destination,
-                    reason=(
-                        "approved by operator"
-                        if record.review_token
-                        else "approved automatically"
-                    ),
+                    reason="approved automatically" if auto else "approved by operator",
                     rule=record.rule_name,
                     provenance=record.provenance(),
                 ),
@@ -477,6 +511,13 @@ class PolicyLedger:
 
     def is_applied(self, chunk_id: str) -> bool:
         return chunk_id in self.applied
+
+    def widen_failed(self, chunk_id: str) -> None:
+        """Record a widening the gateway cannot commit, so it is never re-offered."""
+        self.failed.add(chunk_id)
+
+    def is_failed(self, chunk_id: str) -> bool:
+        return chunk_id in self.failed
 
     def revert_denial(self, denial: PolicyDenial) -> None:
         """Return an undelivered denial's marks to the pool."""
@@ -658,17 +699,25 @@ class PolicyEventWatcher:
                 and record not in widening
             ):
                 widening.append(record)
+        for record in widening:
+            commit_outcome, reason = await self._widen_at_boundary(
+                conversation_id, container, record, status
+            )
+            if commit_outcome is CommitOutcome.COMMITTED:
+                ledger.widen_decided(record.chunk_id)
+            elif commit_outcome is CommitOutcome.FAILED:
+                ledger.widen_failed(record.chunk_id)
+                delivered_notices.append(
+                    f"Governance: the gateway approved access to "
+                    f"{record.destination} but the policy could not be "
+                    f"applied ({reason}). The destination stays denied."
+                )
         if delivered_notices:
             await asyncio.to_thread(
                 self.gateway.append_notices,
                 sandbox,
                 "\n".join(delivered_notices) + "\n",
             )
-        for record in widening:
-            if await self._widen_at_boundary(
-                conversation_id, container, record, status
-            ):
-                ledger.widen_decided(record.chunk_id)
 
         if log_lines:
             newest = max(
@@ -724,24 +773,25 @@ class PolicyEventWatcher:
         container: ConversationContainer,
         record: PolicyProposalRecord,
         status: ConversationExecutionStatus | None,
-    ) -> bool:
-        """Commit the widening only while no agent run holds the turn.
+    ) -> tuple[CommitOutcome, str]:
+        """Commit a widening; human approvals wait for the turn boundary.
 
         A token-bearing (human) approval waits for the turn boundary so the
-        operator's next turn carries the retry. An auto approval carries no
-        review token and must not wait: see ``PolicyLedger.process_proposal``.
+        operator's next turn carries the retry; an auto approval commits while
+        the turn is still running. The return carries the commit outcome and,
+        for ``CommitOutcome.FAILED``, the reason for the failure notice.
         """
-        if record.review_token:
+        if not record.auto_approved:
             if status is None:
                 logger.warning("Could not read the conversation state; not widening")
-                return False
+                return CommitOutcome.RETRY, ""
             if status == ConversationExecutionStatus.RUNNING:
-                return False
+                return CommitOutcome.RETRY, ""
             # The cycle's snapshot can predate a turn that started while the
             # policy records were processed; re-read immediately before the
             # commit, which is the turn-boundary gate.
             if await self._conversation_is_running(conversation_id, container):
-                return False
+                return CommitOutcome.RETRY, ""
         try:
             await asyncio.to_thread(
                 self.gateway.commit_approved_chunk,
@@ -750,14 +800,28 @@ class PolicyEventWatcher:
                 record.review_token,
             )
         except grpc.RpcError as exc:
-            if exc.code() == grpc.StatusCode.ALREADY_EXISTS:
-                return True  # The gateway already committed this chunk.
-            logger.warning("Widening commit for chunk %s failed", record.chunk_id)
-            return False
-        except Exception:
-            logger.warning("Widening commit for chunk %s failed", record.chunk_id)
-            return False
-        return True
+            code = exc.code()
+            if code == grpc.StatusCode.ALREADY_EXISTS:
+                return CommitOutcome.COMMITTED, ""  # Already committed.
+            if code in _PERMANENT_COMMIT_CODES:
+                logger.warning(
+                    "Widening commit for chunk %s failed permanently: %s",
+                    record.chunk_id,
+                    code.name,
+                )
+                return CommitOutcome.FAILED, code.name
+            logger.warning(
+                "Widening commit for chunk %s failed with %s; retrying",
+                record.chunk_id,
+                code.name,
+            )
+            return CommitOutcome.RETRY, ""
+        except Exception as exc:
+            logger.warning(
+                "Widening commit for chunk %s failed; retrying", record.chunk_id
+            )
+            return CommitOutcome.RETRY, exc.__class__.__name__
+        return CommitOutcome.COMMITTED, ""
 
     async def _conversation_snapshot(
         self,

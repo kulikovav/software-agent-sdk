@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+import grpc
 import httpx
 import pytest
 
@@ -406,6 +407,10 @@ class TestPolicyLedgerProposals:
         assert "token-1" not in outcome.event.model_dump_json()
         assert "token-1" not in str(ledger.to_state())
 
+    def test_auto_approved_is_inferred_from_the_review_token(self):
+        assert _proposal(status="approved").auto_approved is False
+        assert _proposal(status="approved", review_token="").auto_approved is True
+
 
 def _fake_timestamp(epoch: float) -> Any:
     class FakeTimestamp:
@@ -478,12 +483,23 @@ def _failing_watcher(registry: "_FakeRegistry") -> PolicyEventWatcher:
     return watcher
 
 
+class _RpcError(grpc.RpcError):
+    """A gRPC error with only the ``code()`` surface the watcher reads."""
+
+    def __init__(self, code: grpc.StatusCode) -> None:
+        self._code = code
+
+    def code(self) -> grpc.StatusCode:
+        return self._code
+
+
 class _FakeGateway:
     def __init__(self) -> None:
         self.log_lines: list[Any] = []
         self.chunks: list[Any] = []
         self.committed: list[tuple[str, str]] = []
         self.notices: list[str] = []
+        self.commit_error: grpc.StatusCode | None = None
 
     def logs(self, name: str, since_epoch: float | None = None) -> list[Any]:
         return self.log_lines
@@ -493,6 +509,8 @@ class _FakeGateway:
 
     def commit_approved_chunk(self, name: str, chunk_id: str, review_token: str) -> int:
         self.committed.append((chunk_id, review_token))
+        if self.commit_error is not None:
+            raise _RpcError(self.commit_error)
         return 2
 
     def append_notices(self, name: str, text: str) -> None:
@@ -719,6 +737,63 @@ class TestPolicyEventWatcher:
 
         assert [event["json"]["status"] for event in posts] == ["approved"]
         assert registry.gateway.committed == [("chunk-1", "token-1")]
+
+    @pytest.mark.asyncio
+    async def test_a_permanent_commit_failure_records_the_chunk_failed(
+        self, monkeypatch
+    ):
+        clock = _Clock()
+        monkeypatch.setattr(events_module, "time", SimpleNamespace(time=clock))
+        registry = _FakeRegistry()
+        registry.gateway.chunks = [
+            _chunk(
+                id="chunk-1",
+                status="approved",
+                decided_time=_fake_timestamp(clock.now + 1.0),
+            )
+        ]
+        registry.gateway.commit_error = grpc.StatusCode.INVALID_ARGUMENT
+        posts: list[dict[str, Any]] = []
+        watcher = _watcher(registry, posts)
+
+        await watcher.cycle()
+        await watcher.cycle()
+
+        assert registry.gateway.committed == [("chunk-1", "token-1")]
+        assert registry.saved[-1]["failed"] == ["chunk-1"]
+        assert len(registry.gateway.notices) == 1
+        assert "stays denied" in registry.gateway.notices[0]
+        assert "INVALID_ARGUMENT" in registry.gateway.notices[0]
+        assert [event["json"]["status"] for event in posts] == ["approved"]
+
+        restored = PolicyLedger(registry.saved[-1])
+        assert restored.is_failed("chunk-1")
+        assert not restored.process_proposal(_proposal(status="approved"), now=2.0)
+
+    @pytest.mark.asyncio
+    async def test_a_transient_commit_failure_retries_on_the_next_cycle(
+        self, monkeypatch
+    ):
+        clock = _Clock()
+        monkeypatch.setattr(events_module, "time", SimpleNamespace(time=clock))
+        registry = _FakeRegistry()
+        registry.gateway.chunks = [
+            _chunk(
+                id="chunk-1",
+                status="approved",
+                decided_time=_fake_timestamp(clock.now + 1.0),
+            )
+        ]
+        registry.gateway.commit_error = grpc.StatusCode.UNAVAILABLE
+        posts: list[dict[str, Any]] = []
+        watcher = _watcher(registry, posts)
+
+        await watcher.cycle()
+        await watcher.cycle()
+
+        assert registry.gateway.committed == [("chunk-1", "token-1")] * 2
+        assert registry.saved[-1]["failed"] == []
+        assert registry.gateway.notices == []
 
     @pytest.mark.asyncio
     async def test_a_stopped_sandbox_is_not_watched(self):

@@ -259,11 +259,13 @@ class OpenShellGateway:
         return list(response.chunks)
 
     def commit_approved_chunk(self, name: str, chunk_id: str, review_token: str) -> int:
-        """Commit one human-approved widening request at a turn boundary.
+        """Commit one widening request the gateway has already decided.
 
-        Only a chunk the operator already decided may pass here: the driver
-        never approves a pending or rejected proposal, and it never batches
-        chunks, so no automated surface performs a bulk approval.
+        The driver only passes a chunk the gateway already approved: it never
+        approves a pending or rejected proposal, and it never batches chunks,
+        so no automated surface performs a bulk approval. A token-bearing
+        (human) approval is committed after the turn ends; an auto approval
+        carries an empty token and commits immediately.
         """
         response = self._client._stub.ApproveDraftChunk(
             pb.ApproveDraftChunkRequest(
