@@ -111,11 +111,59 @@ class TestParseDenial:
     def test_parse_ignores_an_allowed_line(self):
         assert parse_denial("HTTP:POST ALLOWED POST https://example/v1/x") is None
 
+    def test_parse_request_target_encoded_slash_rejection(self):
+        denial = parse_denial(
+            "HTTP request-target rejected: request-target contains an encoded "
+            "'/' (%2F) which is not allowed on this endpoint"
+        )
+
+        assert denial == PolicyDenial(
+            layer="http",
+            destination="request-target",
+            reason="encoded_slash",
+        )
+
+    def test_parse_request_target_rejection_with_another_cause(self):
+        denial = parse_denial(
+            "HTTP request-target rejected: request-target contains a fragment",
+        )
+
+        assert denial == PolicyDenial(
+            layer="http",
+            destination="request-target",
+            reason="request_target_rejected",
+        )
+
+    def test_parse_request_target_rejection_prefers_structured_fields(self):
+        denial = parse_denial(
+            "HTTP request-target rejected: request-target contains a fragment",
+            fields={
+                "reason": "allow_deny_overlap",
+                "rule": "GET /x",
+                "tool": "terminal",
+            },
+        )
+
+        assert denial == PolicyDenial(
+            layer="http",
+            destination="request-target",
+            reason="allow_deny_overlap",
+            rule="GET /x",
+            tool="terminal",
+        )
+
 
 class TestGovernanceInjection:
     def test_governance_context_states_default_deny_and_one_retry(self):
         assert "denied by default" in GOVERNANCE_CONTEXT
         assert "one retry" in GOVERNANCE_CONTEXT
+
+    def test_governance_context_names_policy_dns_and_encoded_slash_symptoms(self):
+        assert "198.18.0.0/15" in GOVERNANCE_CONTEXT
+        assert "stale policy-DNS" in GOVERNANCE_CONTEXT
+        assert "%2F" in GOVERNANCE_CONTEXT
+        assert "TLS EOF" in GOVERNANCE_CONTEXT
+        assert "numeric identifier" in GOVERNANCE_CONTEXT
 
     def test_hook_config_reads_and_clears_the_notices_file(self):
         config = governed_hook_config(None)
