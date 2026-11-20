@@ -290,6 +290,23 @@ class TestPolicyLedgerProposals:
         again = ledger.process_proposal(record, now=2.0)
         assert not again
 
+    def test_an_auto_approval_widens_without_a_review_token(self):
+        record = _proposal(status="approved", review_token="")
+        ledger = PolicyLedger()
+
+        outcome = ledger.process_proposal(record, now=1.0)
+
+        assert outcome.event is not None
+        assert outcome.event.status == "approved"
+        assert outcome.event.reason == "approved automatically"
+        assert outcome.widen_pending is True
+
+        # An uncommitted auto approval keeps being offered like a human one.
+        assert ledger.process_proposal(record, now=2.0).widen_pending is True
+
+        ledger.widen_decided("chunk-1")
+        assert not ledger.process_proposal(record, now=3.0)
+
     def test_a_rejection_reason_reaches_the_notice_for_the_next_turn(self):
         record = _proposal(
             status="rejected",
@@ -601,6 +618,36 @@ class TestPolicyEventWatcher:
 
         assert registry.gateway.committed == [("chunk-1", "token-1")]
         assert [event["json"]["status"] for event in posts] == ["approved"]
+
+    @pytest.mark.asyncio
+    async def test_an_auto_approval_commits_while_the_turn_is_running(
+        self, monkeypatch
+    ):
+        clock = _Clock()
+        monkeypatch.setattr(events_module, "time", SimpleNamespace(time=clock))
+        registry = _FakeRegistry()
+        registry.gateway.chunks = [
+            _chunk(
+                id="chunk-1",
+                status="approved",
+                review_token="",
+                decided_time=_fake_timestamp(clock.now + 1.0),
+            )
+        ]
+        posts: list[dict[str, Any]] = []
+        watcher = _watcher(registry, posts, execution_status="running")
+
+        await watcher.cycle()
+
+        # No human retry waits for the boundary, so an auto approval is
+        # committed in-turn with the empty token the proto treats as unset.
+        assert registry.gateway.committed == [("chunk-1", "")]
+        assert posts[0]["json"]["reason"] == "approved automatically"
+
+        await watcher.cycle()
+
+        assert len(posts) == 1
+        assert registry.gateway.committed == [("chunk-1", "")]
 
     @pytest.mark.asyncio
     async def test_a_rejection_writes_its_notice_for_the_next_turn(self, monkeypatch):

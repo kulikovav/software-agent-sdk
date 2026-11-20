@@ -3,8 +3,9 @@
 The governed runtime driver holds the gateway identity, so it also drives the
 governance loop: it states the standing rules when it provisions a sandbox,
 watches the gateway's denial and proposal records, delivers each decision to
-the conversation as a :class:`PolicyEvent`, and commits a human-approved rule
-widening only at a turn boundary. Narrowing and revocation are gateway safety
+the conversation as a :class:`PolicyEvent`, commits a human-approved rule
+widening only at a turn boundary, and commits a gateway auto-approval
+immediately. Narrowing and revocation are gateway safety
 actions and pass through immediately.
 """
 
@@ -388,11 +389,7 @@ class PolicyLedger:
         if previous == status:
             # A committed widening needs no re-offer; one the commit still
             # holds at the boundary does, across cycles and restarts alike.
-            if (
-                status == "approved"
-                and record.review_token
-                and not self.is_applied(record.chunk_id)
-            ):
+            if status == "approved" and not self.is_applied(record.chunk_id):
                 return ProposalOutcome(widen_pending=True)
             return ProposalOutcome()
         self.chunk_status[record.chunk_id] = status
@@ -415,15 +412,24 @@ class PolicyLedger:
         if status == "expired":
             return self._expired_outcome(record)
         if status == "approved":
+            # An empty review token identifies a gateway auto-approval
+            # (unverified gateway-side premise: the DraftPolicyChunk proto has
+            # no auto/human flag). An auto approval must apply in-turn, since
+            # a one-turn task never crosses a turn boundary; a human approval
+            # can wait for the operator's next turn.
             return ProposalOutcome(
                 event=PolicyEvent(
                     status="approved",
                     destination=record.destination,
-                    reason="approved by operator",
+                    reason=(
+                        "approved by operator"
+                        if record.review_token
+                        else "approved automatically"
+                    ),
                     rule=record.rule_name,
                     provenance=record.provenance(),
                 ),
-                widen_pending=bool(record.review_token),
+                widen_pending=True,
             )
         if status == "rejected":
             reason = record.rejection_reason or "rejected by operator"
@@ -719,17 +725,23 @@ class PolicyEventWatcher:
         record: PolicyProposalRecord,
         status: ConversationExecutionStatus | None,
     ) -> bool:
-        """Commit the widening only while no agent run holds the turn."""
-        if status is None:
-            logger.warning("Could not read the conversation state; not widening")
-            return False
-        if status == ConversationExecutionStatus.RUNNING:
-            return False
-        # The cycle's snapshot can predate a turn that started while the
-        # policy records were processed; re-read immediately before the
-        # commit, which is the turn-boundary gate.
-        if await self._conversation_is_running(conversation_id, container):
-            return False
+        """Commit the widening only while no agent run holds the turn.
+
+        A token-bearing (human) approval waits for the turn boundary so the
+        operator's next turn carries the retry. An auto approval carries no
+        review token and must not wait: see ``PolicyLedger.process_proposal``.
+        """
+        if record.review_token:
+            if status is None:
+                logger.warning("Could not read the conversation state; not widening")
+                return False
+            if status == ConversationExecutionStatus.RUNNING:
+                return False
+            # The cycle's snapshot can predate a turn that started while the
+            # policy records were processed; re-read immediately before the
+            # commit, which is the turn-boundary gate.
+            if await self._conversation_is_running(conversation_id, container):
+                return False
         try:
             await asyncio.to_thread(
                 self.gateway.commit_approved_chunk,
