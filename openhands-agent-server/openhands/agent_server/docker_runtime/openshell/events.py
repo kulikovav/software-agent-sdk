@@ -34,10 +34,15 @@ GOVERNANCE_CONTEXT = (
     "This conversation runs inside a governed sandbox: egress is denied by "
     "default and only the model endpoint is allowed; the workspace is "
     "ephemeral; credentials resolve outside the sandbox, so only placeholders "
-    "reach the tools. A denied request is named in the tool outcome and in a "
-    "policy event. Ask the operator for an approval when a task needs another "
-    "destination; after an approval, exactly one retry is allowed on the next "
-    "turn."
+    "reach the tools. A denial appears in a policy event; the tool outcome may "
+    "show only its network symptom. Ask the operator for an approval when a "
+    "task needs another destination; after an approval, exactly one retry is "
+    "allowed on the next turn. A connection to an address in 198.18.0.0/15 "
+    "that fails or hangs may be a stale policy-DNS mapping: retry with a new "
+    "connection; if it still fails, ask the operator for access. A TLS EOF on "
+    "a request whose URL contains %2F means the gateway rejected the encoded "
+    "slash: for APIs with numeric identifiers, such as GitLab, use the numeric "
+    "identifier instead."
 )
 
 # Proposals expire unanswered after this long; the next turn learns of it.
@@ -133,6 +138,21 @@ def parse_denial(
     over one parsed out of the message text.
     """
     text = line.strip()
+    if text.startswith("HTTP request-target rejected:"):
+        # No " DENIED " marker on this line, so this check stays above the
+        # gate below. The line names no host, so a fixed label stands in; all
+        # such rejections share one dedup key.
+        default_reason = (
+            "encoded_slash" if "encoded '/'" in text else "request_target_rejected"
+        )
+        parsed = dict(fields or {})
+        return PolicyDenial(
+            layer="http",
+            destination="request-target",
+            reason=parsed.get("reason") or parsed.get("policy") or default_reason,
+            rule=parsed.get("rule"),
+            tool=parsed.get("tool"),
+        )
     if " DENIED " not in text:
         return None
     prefix, rest = text.split(" DENIED ", 1)
