@@ -457,6 +457,14 @@ class Config(BaseModel):
             "model endpoint resolves without a key inside the sandbox."
         ),
     )
+    openshell_sandbox_memory: str | None = Field(
+        default=None,
+        description=(
+            "Memory limit for every governed sandbox, as a Kubernetes-style "
+            "quantity (for example '6Gi'). Unset uses the gateway's "
+            "built-in podman-driver default of 4 GiB."
+        ),
+    )
     openshell_service_port: int | None = Field(
         default=None,
         description=(
