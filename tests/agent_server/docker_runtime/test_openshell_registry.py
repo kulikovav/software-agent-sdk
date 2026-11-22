@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import cast
 from uuid import UUID, uuid4
 
 import grpc
@@ -532,7 +533,7 @@ async def test_a_partial_copy_does_not_reload_the_catalog(tmp_path):
         async def refresh_persisted_conversation(self, requested_id: UUID) -> None:
             calls.append(requested_id)
 
-    registry.configure_service(_Service())
+    registry.configure_service(cast(ConversationService, _Service()))
     assert await registry.sync_conversation_record(conversation_id) is False
     assert calls == []
 

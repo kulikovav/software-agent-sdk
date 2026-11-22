@@ -195,14 +195,19 @@ _OPEN_SHELL_KEY_PREFIX = "openshell:resolve:"
 
 def _llm_key_of(holder: object) -> str | None:
     """The model key a settings model, an agent, or a raw settings dict carries."""
+    key: object = None
     if isinstance(holder, dict):
         llm = holder.get("llm")
-        key: object = llm.get("api_key") if isinstance(llm, dict) else None
+        key = llm.get("api_key") if isinstance(llm, dict) else None
     else:
         key = getattr(getattr(holder, "llm", None), "api_key", None)
     if key is None:
         return None
-    secret = key.get_secret_value() if hasattr(key, "get_secret_value") else str(key)
+    secret: str = (
+        key.get_secret_value()  # type: ignore[attr-defined]
+        if hasattr(key, "get_secret_value")
+        else str(key)
+    )
     return secret or None
 
 

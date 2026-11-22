@@ -133,7 +133,7 @@ async def test_http_target_ca_bundle_reaches_the_httpx_client(monkeypatch, tmp_p
 
     monkeypatch.setattr(proxy.httpx, "AsyncClient", client_factory)
     response = await proxy.proxy_http(request, target, upstream_path="/api/test")
-    await response.body_iterator.aclose()
+    await response.body_iterator.aclose()  # type: ignore[attr-defined]
 
     assert seen["verify"] == target.ca_bundle
 

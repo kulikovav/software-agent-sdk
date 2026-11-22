@@ -2,6 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -1043,7 +1044,10 @@ def test_governed_runtime_credentials_are_not_served(tmp_path, monkeypatch):
     conversation_id = uuid4()
 
     with TestClient(app) as client:
-        registry = server_context_of(app).conversation_registry
+        registry = cast(
+            DockerConversationRegistry,
+            server_context_of(app).conversation_registry,
+        )
         registry.provisioning.create(conversation_id)
         record = registry.conversation_dir(conversation_id)
         record.mkdir(parents=True, exist_ok=True)
@@ -1182,7 +1186,9 @@ def test_a_start_of_an_archived_conversation_returns_410(tmp_path, monkeypatch):
     monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "persistence"))
     app = _governed_app(tmp_path, monkeypatch)
     conversation_id = uuid4()
-    registry = server_context_of(app).conversation_registry
+    registry = cast(
+        DockerConversationRegistry, server_context_of(app).conversation_registry
+    )
     identity = registry.provisioning.create(conversation_id)
     registry.provisioning.save(
         identity.model_copy(update={"service_url": "https://gone:17670"})
