@@ -76,7 +76,7 @@ STORE_GETTERS = frozenset(
 )
 
 # Methods that only build or inspect an object and touch no file.
-_PURE_METHODS = frozenset({"with_cipher", "manifest_path"})
+_PURE_METHODS = frozenset({"with_cipher", "manifest_path", "policy_state_path"})
 
 THREAD_HOPS = frozenset({"to_thread", "run_in_executor", "run_in_threadpool"})
 FACADE = "run_store"

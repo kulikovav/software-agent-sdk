@@ -79,7 +79,7 @@ async def test_an_openshell_request_runs_in_its_sandbox(monkeypatch, tmp_path):
         conversation_service=AsyncMock(),
         reusable_conversation_id=uuid4(),
         config=config,
-        registry=registry,
+        registry=registry,  # type: ignore[arg-type]
     )
 
     assert result == "offhost"

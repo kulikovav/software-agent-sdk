@@ -53,7 +53,9 @@ def test_create_without_a_memory_limit_leaves_the_resources_struct_empty(
 
     create(gateway)
 
-    template = sdk.created["spec"].template
+    created = sdk.created
+    assert created is not None
+    template = created["spec"].template
     assert not template.resources
 
 
@@ -71,7 +73,9 @@ def test_create_passes_the_memory_limit_in_the_resources_struct(monkeypatch):
         memory="6Gi",
     )
 
-    template = sdk.created["spec"].template
+    created = sdk.created
+    assert created is not None
+    template = created["spec"].template
     assert template.resources["limits"]["memory"] == "6Gi"
 
 
