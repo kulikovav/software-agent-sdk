@@ -87,7 +87,12 @@ class FakeGateway(OpenShellGateway):
         self.closed = True
 
 
-def make_registry(tmp_path, gateway, policy: str | None = "governed-sandbox.yaml"):
+def make_registry(
+    tmp_path,
+    gateway,
+    policy: str | None = "governed-sandbox.yaml",
+    **config_overrides,
+):
     policy_dir = tmp_path / "policies"
     policy_dir.mkdir(exist_ok=True)
     (policy_dir / "governed-sandbox.yaml").write_text(
@@ -129,12 +134,34 @@ filesystem_policy:
         openshell_policy=policy,
         openshell_policy_dir=str(policy_dir),
         secret_key=SecretStr("outer-key"),
+        **config_overrides,
     )
     return OpenShellConversationRegistry(config, gateway=gateway)
 
 
 def test_the_server_defaults_to_the_governed_sandbox_policy():
     assert Config().openshell_policy == "governed-sandbox.yaml"
+
+
+def test_build_container_passes_the_configured_limits_to_the_gateway(
+    tmp_path, monkeypatch
+):
+    gateway = FakeGateway()
+    registry = make_registry(
+        tmp_path,
+        gateway,
+        openshell_sandbox_cpu="2.5",
+        openshell_sandbox_memory="6Gi",
+    )
+    monkeypatch.setattr(registry, "_wait_until_ready", lambda container: None)
+    conversation_id = uuid4()
+    registry.provisioning.create(conversation_id)
+
+    registry._build_container(conversation_id)
+
+    create = gateway.created[0]
+    assert create["cpu"] == "2.5"
+    assert create["memory"] == "6Gi"
 
 
 def test_build_container_creates_a_sandbox_and_records_its_url(tmp_path, monkeypatch):

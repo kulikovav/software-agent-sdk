@@ -461,16 +461,18 @@ class Config(BaseModel):
         default=None,
         description=(
             "Memory limit for every governed sandbox, as a Kubernetes-style "
-            "quantity (for example '6Gi'). Unset uses the gateway's "
-            "built-in podman-driver default of 4 GiB."
+            "quantity (for example '6Gi'). Unset leaves `limits.memory` out, "
+            "so the podman driver keeps its built-in 4 GiB "
+            "`DEFAULT_MEMORY_LIMIT`."
         ),
     )
     openshell_sandbox_cpu: str | None = Field(
         default=None,
         description=(
             "CPU limit for every governed sandbox, as a Kubernetes-style "
-            "quantity (for example '2', '500m', '2.5'). Unset uses the "
-            "gateway's built-in podman-driver default of 2 cores."
+            "quantity (for example '2', '500m', '2.5'). Unset leaves "
+            "`limits.cpu` out, so the podman driver keeps its built-in 2-core "
+            "`DEFAULT_CPU_QUOTA`."
         ),
     )
     openshell_service_port: int | None = Field(
