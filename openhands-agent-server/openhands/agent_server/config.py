@@ -465,6 +465,14 @@ class Config(BaseModel):
             "built-in podman-driver default of 4 GiB."
         ),
     )
+    openshell_sandbox_cpu: str | None = Field(
+        default=None,
+        description=(
+            "CPU limit for every governed sandbox, as a Kubernetes-style "
+            "quantity (for example '2', '500m', '2.5'). Unset uses the "
+            "gateway's built-in podman-driver default of 2 cores."
+        ),
+    )
     openshell_service_port: int | None = Field(
         default=None,
         description=(

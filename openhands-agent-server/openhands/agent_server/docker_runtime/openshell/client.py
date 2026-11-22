@@ -136,19 +136,27 @@ class OpenShellGateway:
         expose_port: int,
         policy: sandbox_pb2.SandboxPolicy | None = None,
         memory: str | None = None,
+        cpu: str | None = None,
     ) -> SandboxRef:
         spec = pb.SandboxSpec(
             template=pb.SandboxTemplate(image=image),
             command=list(command),
             environment=dict(environment),
         )
-        if memory is not None:
+        limits = {
+            key: value
+            for key, value in (("cpu", cpu), ("memory", memory))
+            if value is not None
+        }
+        if limits:
             # The gateway reads the Kubernetes limits shape out of this Struct
             # (crates/openshell-server/src/compute/mod.rs
             # `extract_typed_resources`) and the podman driver applies
-            # `limits.memory`; without it the driver falls back to its
-            # built-in 4 GiB default.
-            spec.template.resources.update({"limits": {"memory": memory}})
+            # `limits.memory` and `limits.cpu`; without them the driver falls
+            # back to its built-in 4 GiB memory default and 2-core
+            # `DEFAULT_CPU_QUOTA`. Write both keys in one update: two separate
+            # updates would let the second overwrite the first's `limits` key.
+            spec.template.resources.update({"limits": limits})
         if policy is not None:
             spec.policy.CopyFrom(policy)
         if provider:
