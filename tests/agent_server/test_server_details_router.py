@@ -168,6 +168,13 @@ def test_server_info_reports_configured_conversation_runtime(tmp_path, monkeypat
         )
 
 
+def test_server_info_reports_a_governed_conversation_runtime():
+    info = sdr.build_server_info("openshell")
+
+    assert info.conversation_runtime == "openshell"
+    assert "governed_conversation_runtime_v1" in info.capabilities
+
+
 def test_server_info_reports_runtime_timeout_cap(
     client,
     monkeypatch: pytest.MonkeyPatch,

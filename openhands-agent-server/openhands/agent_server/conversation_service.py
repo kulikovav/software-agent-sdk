@@ -37,6 +37,7 @@ from openhands.agent_server.experimental_features import (
     experimental_feature_tools,
     host_experimental_features,
 )
+from openhands.agent_server.git_identity import apply_git_identity
 from openhands.agent_server.launch import (
     is_codex_source,
     launch_source,
@@ -1746,6 +1747,19 @@ class ConversationService:
             if worktree is not None
             else request.workspace
         )
+
+        # The Application settings' Git identity lives in the frontend-owned
+        # misc_settings; without this the agent's commits never use it
+        # (OpenHands/OpenHands#17899). Local workspaces only: a remote
+        # workspace is configured on the deployment that owns it. For a
+        # worktree conversation the repo-local write lands in the shared
+        # parent .git/config (see git_identity's docstring).
+        if isinstance(workspace, LocalWorkspace):
+            await asyncio.to_thread(
+                apply_git_identity,
+                Path(workspace.working_dir),
+                settings.misc_settings,
+            )
 
         # The server may resolve built-in tools that the creating client does not
         # import, as happens when a lightweight orchestrator starts a runtime

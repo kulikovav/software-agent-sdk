@@ -32,6 +32,10 @@ class RuntimeIdentity(BaseModel):
     worktree_git_common_dir_path: Path | None = None
     launched_agent_profile: LaunchedAgentProfile | None = None
     container: ConversationContainerOptions | None = None
+    # The gateway publishes the agent server at this URL. Only a create
+    # response carries it, so the driver records it here and reuses it when it
+    # adopts the sandbox after a restart.
+    service_url: str | None = None
 
     @property
     def cipher(self) -> Cipher:
@@ -56,6 +60,11 @@ class RuntimeProvisioningStore:
 
     def manifest_path(self, conversation_id: UUID) -> Path:
         return self.control_root / f"{conversation_id.hex}.json"
+
+    def policy_state_path(self, conversation_id: UUID) -> Path:
+        # Beside the manifest: the policy-watch cursor survives a restart so
+        # decisions are never posted twice, and dies with the conversation.
+        return self.control_root / f"{conversation_id.hex}.policy.json"
 
     def runtime_dir(self, conversation_id: UUID) -> Path:
         return self.direct_child(self.data_root, conversation_id.hex)

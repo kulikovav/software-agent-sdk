@@ -19,6 +19,7 @@ from openhands.sdk.event.llm_convertible import (
     UserRejectObservation,
 )
 from openhands.sdk.event.message_edit import MessageEditEvent
+from openhands.sdk.event.policy import PolicyDecision, PolicyEvent
 from openhands.sdk.event.reaction import (
     REACTION_EMOJI,
     ReactionEmoji,
@@ -62,6 +63,8 @@ __all__ = [
     "ConversationStateUpdateEvent",
     "HookExecutionEvent",
     "LLMCompletionLogEvent",
+    "PolicyEvent",
+    "PolicyDecision",
     "EventID",
     "ToolCallID",
     "UnmaskedID",

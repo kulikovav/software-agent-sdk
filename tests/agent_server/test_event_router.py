@@ -25,6 +25,7 @@ from openhands.sdk import Message
 from openhands.sdk.conversation.event_store import EventLog
 from openhands.sdk.conversation.types import CONVERSATION_SENDER_PREFIX
 from openhands.sdk.event.llm_convertible.message import MessageEvent
+from openhands.sdk.event.policy import PolicyEvent
 from openhands.sdk.io.memory import InMemoryFileStore
 from openhands.sdk.llm.message import ImageContent, TextContent
 from tests.agent_server.conftest import install_test_context, update_test_context
@@ -1000,3 +1001,138 @@ def test_unknown_event_id_is_404_and_null_in_batch(client, sample_conversation_i
         assert client.post(f"{url}/batch", json=[]).json() == []
     finally:
         client.app.dependency_overrides.clear()
+
+
+_POLICY_EVENT = {
+    "kind": "PolicyEvent",
+    "status": "denied",
+    "destination": "example.com",
+    "reason": "transparent_tcp_policy_denied",
+    "provenance": {"proposal": "chunk-1"},
+}
+
+
+class TestPolicyEventEndpoint:
+    """The runtime watcher's delivery route for governance decisions."""
+
+    def _client(self, event_service, registry=None) -> TestClient:
+        app = FastAPI()
+        app.include_router(event_router, prefix="/api")
+        app.dependency_overrides[get_event_service] = lambda: event_service
+        install_test_context(app, conversation_registry=registry)
+        client = TestClient(app)
+        return client
+
+    def test_a_policy_event_is_appended_without_a_run(self):
+        event_service = AsyncMock(spec=EventService)
+        event_service.append_policy_event = AsyncMock()
+        client = self._client(event_service)
+
+        response = client.post(
+            f"/api/conversations/{uuid4()}/events/_policy", json=_POLICY_EVENT
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"success": True}
+        appended = event_service.append_policy_event.await_args[0][0]
+        assert isinstance(appended, PolicyEvent)
+        assert appended.status == "denied"
+        # The route never runs the agent; delivery is observability only.
+        event_service.send_message.assert_not_called()
+
+    def test_another_event_kind_is_refused(self):
+        event_service = AsyncMock(spec=EventService)
+        client = self._client(event_service)
+        payload = dict(_POLICY_EVENT, kind="MessageEvent")
+
+        response = client.post(
+            f"/api/conversations/{uuid4()}/events/_policy", json=payload
+        )
+
+        assert response.status_code == 422
+        event_service.append_policy_event.assert_not_awaited()
+
+    def test_a_broken_payload_is_refused(self):
+        client = self._client(AsyncMock(spec=EventService))
+
+        response = client.post(
+            f"/api/conversations/{uuid4()}/events/_policy", json={"kind": "Nope"}
+        )
+
+        assert response.status_code == 422
+
+    def test_the_watch_url_names_the_route_the_app_serves(self, tmp_path):
+        """A missing append route answers 405, not 404, so guard the path.
+
+        The watcher runs in this process but posts to the conversation's own
+        server. Pin the URL it builds to a route this app defines, so a rename
+        or a dropped include fails here instead of only in a live sandbox.
+        """
+        from urllib.parse import urlsplit
+
+        from fastapi.routing import APIRoute
+        from pydantic import SecretStr
+        from starlette.routing import Match
+
+        from openhands.agent_server.api import create_app
+        from openhands.agent_server.config import Config
+        from openhands.agent_server.docker_runtime.openshell.events import (
+            policy_event_url,
+        )
+
+        app = create_app(
+            Config(
+                conversations_path=tmp_path / "conversations",
+                workspace_path=tmp_path / "workspaces",
+                secret_key=SecretStr("test-key"),
+            )
+        )
+        url = policy_event_url("http://sandbox", uuid4())
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": urlsplit(url).path,
+            "root_path": "",
+            "headers": [],
+            "query_string": b"",
+        }
+
+        matched = [
+            route
+            for route in app.routes
+            if isinstance(route, APIRoute) and route.matches(scope)[0] is Match.FULL
+        ]
+
+        assert [route.endpoint.__name__ for route in matched] == ["append_policy_event"]
+
+    def test_the_runtime_owner_has_no_policy_event_surface(self, tmp_path):
+        from typing import cast
+
+        from pydantic import SecretStr
+
+        from openhands.agent_server.config import Config
+        from openhands.agent_server.docker_runtime.openshell.client import (
+            OpenShellGateway,
+        )
+        from openhands.agent_server.docker_runtime.openshell.registry import (
+            OpenShellConversationRegistry,
+        )
+
+        config = Config(
+            conversation_runtime="openshell",
+            conversations_path=tmp_path / "conversations",
+            workspace_path=tmp_path / "workspaces",
+            secret_key=SecretStr("outer-key"),
+        )
+        owner = OpenShellConversationRegistry(
+            config, gateway=cast(OpenShellGateway, SimpleNamespace(close=None))
+        )
+        event_service = AsyncMock(spec=EventService)
+        client = self._client(event_service, registry=owner)
+
+        response = client.post(
+            f"/api/conversations/{uuid4()}/events/_policy", json=_POLICY_EVENT
+        )
+
+        assert response.status_code == 404
+        event_service.append_policy_event.assert_not_awaited()

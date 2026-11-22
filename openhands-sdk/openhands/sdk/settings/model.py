@@ -161,8 +161,9 @@ GIT_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
 it as an option."""
 GIT_BRANCH_PREFIX_PATTERN = r"^([A-Za-z0-9][A-Za-z0-9._/-]*)?$"
 """A branch name prefix, possibly empty, under the same rule."""
-ConversationRuntime = Literal["local", "docker"]
-"""Where a conversation runs: on the agent-server's host or in its own container."""
+ConversationRuntime = Literal["local", "docker", "openshell"]
+"""Where a conversation runs: on the agent-server's host, in its own container,
+or in a governed OpenShell sandbox."""
 DefaultRuntime = Literal["local", "worktree", "docker"]
 """Where new conversations run by default: the workspace on the host, a new git
 worktree of it on the host, or their own container."""

@@ -403,7 +403,7 @@ class Config(BaseModel):
             "server did not actually receive."
         ),
     )
-    conversation_runtime: Literal["local", "docker"] = "local"
+    conversation_runtime: Literal["local", "docker", "openshell"] = "local"
     conversation_runtime_selectable: bool = Field(
         default=False,
         description=(
@@ -412,6 +412,72 @@ class Config(BaseModel):
             "it unset use this server's `conversation_runtime`. Requires a "
             "Docker daemon and "
             "`OH_SECRET_KEY`."
+        ),
+    )
+
+    @property
+    def conversations_run_offhost(self) -> bool:
+        """Whether every conversation runs outside this server's process."""
+        if self.conversation_runtime_selectable:
+            return False
+        return self.conversation_runtime != "local"
+
+    openshell_workspace: str = Field(
+        default="default",
+        description=(
+            "OpenShell workspace that owns the governed sandboxes. Every "
+            "sandbox operation names it explicitly."
+        ),
+    )
+    openshell_cluster: str | None = Field(
+        default=None,
+        description=(
+            "Registered OpenShell gateway name for the governed runtime. "
+            "Unset selects the CLI's active gateway."
+        ),
+    )
+    openshell_policy: str | None = Field(
+        default="governed-sandbox.yaml",
+        description=(
+            "OpenShell policy applied to every governed sandbox that does not "
+            "name its own. A bare name resolves under `openshell_policy_dir`; "
+            "an absolute path is used as-is. Unset leaves the gateway default."
+        ),
+    )
+    openshell_policy_dir: str = Field(
+        default="/var/lib/openshell/data/policies",
+        description=(
+            "Directory that holds the repository-owned OpenShell policy files."
+        ),
+    )
+    openshell_provider: str | None = Field(
+        default=None,
+        description=(
+            "Provider profile attached to every governed sandbox, so the "
+            "model endpoint resolves without a key inside the sandbox."
+        ),
+    )
+    openshell_sandbox_memory: str | None = Field(
+        default=None,
+        description=(
+            "Memory limit for every governed sandbox, as a Kubernetes-style "
+            "quantity (for example '6Gi'). Unset uses the gateway's "
+            "built-in podman-driver default of 4 GiB."
+        ),
+    )
+    openshell_service_port: int | None = Field(
+        default=None,
+        description=(
+            "Port the gateway publishes its HTTP listener on. The SDK composes "
+            "service URLs on the gateway's internal port; set this when the "
+            "published port differs."
+        ),
+    )
+    openshell_tls_ca: str | None = Field(
+        default=None,
+        description=(
+            "CA bundle that verifies the gateway's HTTPS service URLs. Unset "
+            "uses the system trust store."
         ),
     )
     conversation_image: str = DEFAULT_CONVERSATION_IMAGE

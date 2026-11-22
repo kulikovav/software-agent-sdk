@@ -49,10 +49,93 @@ def _setup(tmp_path):
 
 
 def _mock_container(monkeypatch, *, host="http://inner"):
-    container = SimpleNamespace(host=host, api_key="inner-key")
+    container = SimpleNamespace(host=host, api_key="inner-key", ca_bundle=None)
     mock = AsyncMock(return_value=container)
     monkeypatch.setattr(gateway, "_container", mock)
     return mock
+
+
+async def test_an_openshell_request_runs_in_its_sandbox(monkeypatch, tmp_path):
+    config = Config(
+        conversation_runtime="openshell",
+        conversations_path=tmp_path / "conversations",
+        workspace_path=tmp_path / "workspace",
+        secret_key=SecretStr("outer-key"),
+    )
+    # A governed conversation has no manifest, so only the runtime setting can
+    # keep it off this process.
+    registry = SimpleNamespace(
+        provisioning=SimpleNamespace(manifest_path=lambda _id: tmp_path / "absent")
+    )
+    offhost = AsyncMock(return_value="offhost")
+    monkeypatch.setattr(gateway, "_run_docker_agent", offhost)
+
+    result = await gateway._run_agent(
+        start_request=StartConversationRequest(
+            agent_profile_id=uuid4(),
+            workspace=LocalWorkspace(working_dir=str(config.workspace_path)),
+        ),
+        user_content=[TextContent(text="hi")],
+        conversation_service=AsyncMock(),
+        reusable_conversation_id=uuid4(),
+        config=config,
+        registry=registry,
+    )
+
+    assert result == "offhost"
+    offhost.assert_awaited_once()
+
+
+async def test_a_gateway_run_verifies_the_gateway_ca(monkeypatch, tmp_path):
+    config, registry, outer_service, request = _setup(tmp_path)
+    config = config.model_copy(update={"conversation_runtime": "openshell"})
+    container = SimpleNamespace(
+        host="https://default--oh.openshell.localhost:17670",
+        api_key="inner-key",
+        ca_bundle=str(tmp_path / "ca.crt"),
+    )
+    monkeypatch.setattr(gateway, "_container", AsyncMock(return_value=container))
+    monkeypatch.setattr(
+        gateway,
+        "start_docker_conversation",
+        AsyncMock(return_value=(200, {}, uuid4())),
+    )
+    monkeypatch.setattr(registry, "attach_session", lambda _id: None)
+    monkeypatch.setattr(registry, "detach_session", lambda _id: None)
+    seen: dict[str, object] = {}
+    original = httpx.AsyncClient
+
+    def client(**kwargs):
+        seen.update(kwargs)
+        return original(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    json={
+                        "status": "finished",
+                        "final_response": "ok",
+                        "usage": None,
+                    },
+                )
+            ),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        gateway,
+        "httpx",
+        SimpleNamespace(
+            AsyncClient=client,
+            HTTPError=httpx.HTTPError,
+            TimeoutException=httpx.TimeoutException,
+        ),
+    )
+
+    await _run_gateway(
+        config, registry, outer_service, request, "hi", conversation_id=uuid4()
+    )
+
+    assert seen["verify"] == container.ca_bundle
 
 
 async def _run_gateway(

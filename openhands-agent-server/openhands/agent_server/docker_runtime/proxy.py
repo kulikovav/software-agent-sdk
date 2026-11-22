@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import ssl
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack
 from typing import Any, Protocol
@@ -26,6 +27,15 @@ class ProxyTarget(Protocol):
 
     @property
     def api_key(self) -> str | None: ...
+
+
+def _ca_bundle(target: ProxyTarget) -> str | None:
+    return getattr(target, "ca_bundle", None)
+
+
+def _tls_context(target: ProxyTarget) -> ssl.SSLContext | None:
+    ca_bundle = _ca_bundle(target)
+    return ssl.create_default_context(cafile=ca_bundle) if ca_bundle else None
 
 
 logger = get_logger(__name__)
@@ -159,7 +169,8 @@ async def proxy_http(
             httpx.AsyncClient(
                 timeout=httpx.Timeout(
                     connect=10.0, read=read_timeout, write=30.0, pool=10.0
-                )
+                ),
+                verify=_ca_bundle(workspace) or True,
             )
         )
         upstream = await stack.enter_async_context(
@@ -245,6 +256,7 @@ async def bridge_websocket(
             upstream_url,
             additional_headers=upstream_headers or None,
             subprotocols=subprotocols,
+            ssl=_tls_context(workspace),
         ) as upstream_ws:
             if accept_client:
                 await client_ws.accept(subprotocol=upstream_ws.subprotocol)

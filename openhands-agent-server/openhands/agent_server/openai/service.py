@@ -608,7 +608,7 @@ async def _run_agent(
     if (
         registry is not None
         and not local_owned
-        and (config.conversation_runtime == "docker" or docker_owned)
+        and (config.conversations_run_offhost or docker_owned)
     ):
         return await _run_docker_agent(
             start_request=start_request,
@@ -617,8 +617,8 @@ async def _run_agent(
             reusable_conversation_id=reusable_conversation_id,
             registry=registry,
         )
-    if config.conversation_runtime == "docker" and registry is None:
-        raise Unavailable("Docker conversation runtime is unavailable")
+    if config.conversations_run_offhost and registry is None:
+        raise Unavailable("Container conversation runtime is unavailable")
     event_service = None
     conversation_id = reusable_conversation_id
     if reusable_conversation_id is not None:
@@ -718,7 +718,9 @@ async def _run_docker_agent(
     container = await _container(registry, conversation_id)
     registry.attach_session(conversation_id)
     try:
-        async with httpx.AsyncClient(timeout=130.0, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=130.0, trust_env=False, verify=container.ca_bundle or True
+        ) as client:
             response = await client.post(
                 f"{container.host}/api/conversations/{conversation_id}/events/_gateway/run",
                 headers={"X-Session-API-Key": container.api_key},

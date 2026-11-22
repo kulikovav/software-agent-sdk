@@ -6,11 +6,13 @@ import asyncio
 import hashlib
 import json
 import os
+import ssl
 import subprocess
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from urllib.error import URLError
@@ -54,7 +56,7 @@ _OWNER_LABEL: Final[str] = "ai.openhands.runtime-owner"
 # Environment variables read by openhands.sdk.observability (Laminar / OTEL
 # tracing). Only those actually set on the host are forwarded into the
 # conversation container, so an unconfigured host injects nothing.
-_OBSERVABILITY_ENV_VARS: Final[tuple[str, ...]] = (
+OBSERVABILITY_ENV_VARS: Final[tuple[str, ...]] = (
     "LMNR_PROJECT_API_KEY",
     "LMNR_BASE_URL",
     "LMNR_HTTP_PORT",
@@ -88,6 +90,7 @@ class ConversationContainer:
     host: str
     api_key: str
     container_id: str
+    ca_bundle: str | None = None
 
     def stop(self) -> None:
         result = execute_command(["docker", "stop", self.container_id])
@@ -101,6 +104,10 @@ class ConversationContainer:
             ["docker", "inspect", "-f", "{{.State.Running}}", self.container_id]
         )
         return result.returncode == 0 and result.stdout.strip() == "true"
+
+    def startup_failed(self) -> bool:
+        """True when the runtime cannot still become healthy."""
+        return not self.is_running()
 
 
 @dataclass(slots=True)
@@ -127,6 +134,11 @@ class ContainerLease:
 
 
 class DockerConversationRegistry(ConversationRegistry):
+    # The docker runtime mounts the host workspace at /workspace inside the
+    # container.
+    inner_workspace_root = "/workspace"
+    governed = False
+
     def __init__(self, config: Config, stores: ServerStores) -> None:
         super().__init__(config, stores)
         paths = (
@@ -160,6 +172,31 @@ class DockerConversationRegistry(ConversationRegistry):
         if self._service is not None:
             await self._service.refresh_persisted_conversation(conversation_id)
 
+    async def sync_conversation_record(
+        self,
+        conversation_id: UUID,
+        service: ConversationService | None = None,
+    ) -> bool:
+        """Copy the runtime record into the catalog, then reload the row.
+
+        This is the shared writer for the callers that observe a runtime
+        change: a proxied write, a socket detach, and the governed policy
+        watch. It returns whether the copy was confirmed, so a caller that
+        deduplicates refreshes can retry a failed or partial copy.
+
+        Not every catalog write goes through here. The create path calls
+        ``copy_conversation_record`` directly and then reloads; release,
+        delete, and idle eviction reload only. A failed copy skips the reload,
+        but a later signature-driven read can still surface the copied half.
+        """
+        copied = await asyncio.to_thread(self.refresh_catalog_record, conversation_id)
+        if not copied:
+            return False
+        target = service or self._service
+        if target is not None:
+            await target.refresh_persisted_conversation(conversation_id)
+        return True
+
     def resolve_persisted_cipher(self, conversation_id: UUID) -> Cipher:
         """Resolve persisted state without weakening per-runtime isolation.
 
@@ -177,6 +214,12 @@ class DockerConversationRegistry(ConversationRegistry):
 
     def is_archived(self, conversation_id: UUID) -> bool:
         return self.archived_marker(conversation_id).exists()
+
+    def mark_archived(self, conversation_id: UUID) -> None:
+        """Record the runtime as gone; its state cannot be read again."""
+        self.archived_marker(conversation_id).write_text(
+            json.dumps({"archived_at": datetime.now(UTC).isoformat()})
+        )
 
     def runtime_info(self, conversation_id: UUID) -> ConversationRuntimeInfo:
         identity = self.provisioning.load_optional(conversation_id)
@@ -197,6 +240,16 @@ class DockerConversationRegistry(ConversationRegistry):
         )
 
     def serves_persisted_event_reads(self, _conversation_id: UUID) -> bool:
+        return True
+
+    def refresh_catalog_record(self, _conversation_id: UUID) -> bool:
+        """Copy a runtime-owned conversation record into the outer catalog.
+
+        The catalog is a listing snapshot. A registry whose runtime owns the
+        conversation state overrides this to pull a fresh record, so a catalog
+        row shows the state the conversation actually reached. Returns True
+        when the record is current; the default runtime writes it in place.
+        """
         return True
 
     async def start(self) -> None:
@@ -434,6 +487,23 @@ class DockerConversationRegistry(ConversationRegistry):
     async def stop(self, conversation_id: UUID) -> None:
         await self._stop(conversation_id)
 
+    def delete_runtime(self, conversation_id: UUID) -> None:
+        """Delete runtime storage this registry owns outside the host.
+
+        A Docker container removes itself when it stops; a governed runtime
+        keeps its sandbox until the gateway deletes it.
+        """
+
+    def copy_conversation_record(self, _conversation_id: UUID) -> bool:
+        """Make the runtime's conversation record readable on the host.
+
+        A Docker runtime bind-mounts ``conversations_path``, so the inner
+        server writes the record in place. A runtime without that mount copies
+        it out instead, or the outer catalog stays empty. Returns True when
+        the record is current.
+        """
+        return True
+
     async def stop_if_idle(
         self,
         conversation_id: UUID,
@@ -591,6 +661,9 @@ class DockerConversationRegistry(ConversationRegistry):
                 token = self._lease_generations.get(conversation_id, 0)
 
             info = await service.get_conversation(conversation_id)
+            # A governed row reaches its terminal status in the outer catalog
+            # only through the policy watch's sync. Until that lands, this
+            # reads running and the runtime is not evicted.
             if info is None or not info.execution_status.is_terminal():
                 continue
 
@@ -678,7 +751,7 @@ class DockerConversationRegistry(ConversationRegistry):
 
         # Forward host observability configuration so the in-container agent
         # server initializes tracing with the same Laminar/OTEL backend.
-        for name in _OBSERVABILITY_ENV_VARS:
+        for name in OBSERVABILITY_ENV_VARS:
             value = os.environ.get(name)
             if value:
                 env[name] = value
@@ -700,7 +773,7 @@ class DockerConversationRegistry(ConversationRegistry):
             "DEBUG",
         ]
         forwarded_env_names.extend(
-            name for name in _OBSERVABILITY_ENV_VARS if name in env
+            name for name in OBSERVABILITY_ENV_VARS if name in env
         )
         for name in forwarded_env_names:
             if name in env:
@@ -790,23 +863,23 @@ class DockerConversationRegistry(ConversationRegistry):
 
     def _wait_until_ready(self, container: ConversationContainer) -> None:
         deadline = time.monotonic() + self.config.conversation_container_startup_timeout
+        # A governed runtime publishes an HTTPS service URL on the gateway's
+        # listener, which the deployment verifies with its own CA.
+        context = (
+            ssl.create_default_context(cafile=container.ca_bundle)
+            if container.ca_bundle
+            else None
+        )
         while time.monotonic() < deadline:
             try:
-                with urlopen(container.host + "/health", timeout=1) as response:
+                with urlopen(
+                    container.host + "/health", timeout=1, context=context
+                ) as response:
                     if 200 <= response.status < 300:
                         return
             except (URLError, TimeoutError, ConnectionError):
                 pass
-            running = execute_command(
-                [
-                    "docker",
-                    "inspect",
-                    "-f",
-                    "{{.State.Running}}",
-                    container.container_id,
-                ]
-            )
-            if running.stdout.strip() != "true":
+            if container.startup_failed():
                 raise RuntimeError("Conversation container stopped during startup")
             time.sleep(1)
         raise RuntimeError("Conversation container failed to become healthy in time")

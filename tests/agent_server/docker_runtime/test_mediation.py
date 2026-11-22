@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -21,6 +22,7 @@ from openhands.sdk.conversation.request import (
     AgentLaunchAdditions,
     StartConversationRequest,
 )
+from openhands.sdk.hooks import HookConfig
 from openhands.sdk.launch import LaunchRuntime, LaunchStores, ResolvedLaunch, finalize
 from openhands.sdk.mcp.config import MCPServer
 from openhands.sdk.profiles import OpenHandsAgentProfile
@@ -42,12 +44,16 @@ def config(tmp_path, monkeypatch) -> Config:
     )
 
 
-def _registry(runtime_config: Config) -> DockerConversationRegistry:
+def _registry(
+    runtime_config: Config, *, governed: bool = False
+) -> DockerConversationRegistry:
     """The part of a registry ``_prepare_forward`` reads: config and stores."""
     return cast(
         DockerConversationRegistry,
         SimpleNamespace(
-            config=runtime_config, stores=ServerStores.from_config(runtime_config)
+            config=runtime_config,
+            stores=ServerStores.from_config(runtime_config),
+            governed=governed,
         ),
     )
 
@@ -55,7 +61,7 @@ def _registry(runtime_config: Config) -> DockerConversationRegistry:
 async def _forward(
     request: StartConversationRequest, runtime_config: Config, *, existing=False
 ) -> tuple[dict[str, Any], Any, RuntimeIdentity]:
-    registry = _registry(runtime_config)
+    registry = _registry(runtime_config, governed=False)
     body = request.model_dump(mode="json", context={"expose_secrets": True})
     payload, launched, _, _ = await _prepare_forward(body, registry, existing=existing)
     provisioning = RuntimeProvisioningStore(runtime_config)
@@ -67,7 +73,7 @@ async def _forward(
 @pytest.mark.parametrize("worktree", [False, True])
 async def test_forward_preserves_worktree_flag(tmp_path, monkeypatch, worktree):
     runtime_config = config(tmp_path, monkeypatch)
-    registry = _registry(runtime_config)
+    registry = _registry(runtime_config, governed=False)
     request = StartConversationRequest(
         workspace=LocalWorkspace(working_dir="/workspace"),
         agent=Agent(llm=LLM(model="test", api_key=SecretStr("model-key"))),
@@ -86,6 +92,178 @@ async def test_forward_preserves_worktree_flag(tmp_path, monkeypatch, worktree):
 
 def _no_stores() -> LaunchStores:
     raise AssertionError("the container reads no store")
+
+
+_GOVERNED_KEY = SecretStr("openshell:resolve:env:model-key")
+
+
+def _governed_registry(
+    runtime_config: Config,
+) -> DockerConversationRegistry:
+    return cast(
+        DockerConversationRegistry,
+        SimpleNamespace(
+            config=runtime_config,
+            governed=True,
+            stores=ServerStores.from_config(runtime_config),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_governed_forward_injects_the_governance_context(tmp_path, monkeypatch):
+    runtime_config = config(tmp_path, monkeypatch)
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        agent=Agent(llm=LLM(model="test", api_key=_GOVERNED_KEY)),
+    )
+
+    payload, _, _, _ = await _prepare_forward(
+        request.model_dump(mode="json", context={"expose_secrets": True}),
+        _governed_registry(runtime_config),
+        existing=False,
+    )
+    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+
+    assert (
+        "denied by default"
+        in forwarded["agent_launch_additions"]["system_message_suffix_append"]
+    )
+    hooks = forwarded["hook_config"]["user_prompt_submit"]
+    assert any(hook["name"] == "governance-notices" for hook in hooks[0]["hooks"])
+
+
+@pytest.mark.asyncio
+async def test_a_governed_forward_merges_the_caller_injections(tmp_path, monkeypatch):
+    runtime_config = config(tmp_path, monkeypatch)
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        agent=Agent(llm=LLM(model="test", api_key=_GOVERNED_KEY)),
+        agent_launch_additions=AgentLaunchAdditions(
+            system_message_suffix_append="Caller rules"
+        ),
+        hook_config=HookConfig.model_validate(
+            {
+                "user_prompt_submit": [
+                    {
+                        "matcher": "*",
+                        "hooks": [{"type": "command", "command": "echo"}],
+                    }
+                ]
+            },
+        ),
+    )
+
+    payload, _, _, _ = await _prepare_forward(
+        request.model_dump(mode="json", context={"expose_secrets": True}),
+        _governed_registry(runtime_config),
+        existing=False,
+    )
+    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+
+    suffix = forwarded["agent_launch_additions"]["system_message_suffix_append"]
+    assert suffix.startswith("Caller rules")
+    assert "denied by default" in suffix
+    commands = [
+        hook["command"]
+        for block in forwarded["hook_config"]["user_prompt_submit"]
+        for hook in block["hooks"]
+    ]
+    assert "echo" in commands
+
+
+@pytest.mark.asyncio
+async def test_an_existing_governed_start_is_not_reinjected(tmp_path, monkeypatch):
+    runtime_config = config(tmp_path, monkeypatch)
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        agent=Agent(llm=LLM(model="test", api_key=_GOVERNED_KEY)),
+    )
+
+    payload, _, _, _ = await _prepare_forward(
+        request.model_dump(mode="json", context={"expose_secrets": True}),
+        _governed_registry(runtime_config),
+        existing=True,
+    )
+    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+
+    assert forwarded.get("hook_config") is None
+    additions = forwarded.get("agent_launch_additions") or {}
+    assert additions.get("system_message_suffix_append") is None
+
+
+_MCP_SERVERS = {
+    "srv": MCPServer(command="echo", env={"TOKEN": SecretStr("mcp-token")}),
+}
+
+
+@pytest.mark.asyncio
+async def test_a_governed_start_drops_its_mcp_servers(tmp_path, monkeypatch, caplog):
+    runtime_config = config(tmp_path, monkeypatch)
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        agent=Agent(
+            llm=LLM(model="test", api_key=_GOVERNED_KEY),
+            mcp_config=_MCP_SERVERS,
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        payload, _, _, _ = await _prepare_forward(
+            request.model_dump(mode="json", context={"expose_secrets": True}),
+            _governed_registry(runtime_config),
+            existing=False,
+        )
+    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+
+    assert forwarded["agent"]["mcp_config"] == {}
+    assert "drops MCP servers" in caplog.text
+    assert "srv" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_governed_settings_start_drops_its_mcp_servers(
+    tmp_path, monkeypatch, caplog
+):
+    runtime_config = config(tmp_path, monkeypatch)
+    settings = OpenHandsAgentSettings(
+        llm=LLM(model="test", api_key=_GOVERNED_KEY),
+        mcp_config=_MCP_SERVERS,
+    )
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        agent_settings=settings.model_dump(
+            mode="json", context={"expose_secrets": True}
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        payload, launched, _, _ = await _prepare_forward(
+            request.model_dump(mode="json", context={"expose_secrets": True}),
+            _governed_registry(runtime_config),
+            existing=False,
+        )
+    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+
+    assert forwarded["agent_settings"]["mcp_config"] == {}
+    assert "srv" in caplog.text
+    assert launched is None
+
+
+@pytest.mark.asyncio
+async def test_an_ungoverned_start_keeps_its_mcp_servers(tmp_path, monkeypatch):
+    runtime_config = config(tmp_path, monkeypatch)
+    request = StartConversationRequest(
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        agent=Agent(
+            llm=LLM(model="test", api_key=SecretStr("model-key")),
+            mcp_config=_MCP_SERVERS,
+        ),
+    )
+
+    payload, _, _ = await _forward(request, runtime_config)
+
+    assert payload["agent"]["mcp_config"]["srv"]["command"] == "echo"
 
 
 @pytest.mark.asyncio
@@ -171,7 +349,7 @@ async def test_every_encrypted_field_reaches_the_container_decryptable(
         secrets_encrypted=True,
     )
     body = request.model_dump(mode="json", context={"cipher": runtime_config.cipher})
-    registry = _registry(runtime_config)
+    registry = _registry(runtime_config, governed=False)
 
     payload, _, _, _ = await _prepare_forward(body, registry, existing=False)
     identity = RuntimeProvisioningStore(runtime_config).create(uuid4())

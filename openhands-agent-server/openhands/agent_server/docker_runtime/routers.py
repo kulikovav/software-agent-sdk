@@ -6,7 +6,7 @@ import asyncio
 import json
 import subprocess
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -23,6 +23,10 @@ from openhands.agent_server.dependencies import (
     get_conversation_service,
 )
 from openhands.agent_server.docker_runtime.mediation import materialize_secrets
+from openhands.agent_server.docker_runtime.openshell.events import (
+    governed_hook_config,
+    governed_launch_additions,
+)
 from openhands.agent_server.docker_runtime.proxy import (
     bridge_websocket,
     proxy_http,
@@ -63,7 +67,12 @@ from openhands.sdk.errors import (
 )
 from openhands.sdk.git.exceptions import GitCommandError, GitRepositoryError
 from openhands.sdk.git.utils import run_git_command, validate_git_repository
-from openhands.sdk.launch import AgentLaunchError, LaunchStoreError, ResolvedLaunch
+from openhands.sdk.launch import (
+    AgentLaunchError,
+    LaunchSource,
+    LaunchStoreError,
+    ResolvedLaunch,
+)
 from openhands.sdk.logger import get_logger
 from openhands.sdk.profiles.agent_profile import LaunchedAgentProfile
 from openhands.sdk.profiles.resolver import ProfileNotFound
@@ -77,7 +86,7 @@ logger = get_logger(__name__)
 
 def get_registry(registry: ConversationRegistry) -> DockerConversationRegistry:
     if not isinstance(registry, DockerConversationRegistry):
-        raise Unavailable("Docker conversation runtime is unavailable")
+        raise Unavailable("Container conversation runtime is unavailable")
     return registry
 
 
@@ -173,6 +182,131 @@ def _worktree_git_paths(workspace_path: Path) -> dict[str, Path]:
     }
 
 
+# Canvas sends ``/workspace`` for a backend it treats as the Docker runtime,
+# where that path is the default workspace. A governed runtime maps the alias to
+# its own sandbox root; another absolute path is a host path unless it lies
+# under a runtime root (see ``_is_runtime_workspace``).
+_DEFAULT_WORKSPACE_ALIASES = frozenset({"/workspace"})
+
+# A governed start may carry this gateway placeholder instead of a key; the
+# provider resolves it at egress, so the key never enters the sandbox.
+_OPEN_SHELL_KEY_PREFIX = "openshell:resolve:"
+
+
+def _llm_key_of(holder: object) -> str | None:
+    """The model key a settings model, an agent, or a raw settings dict carries."""
+    if isinstance(holder, dict):
+        llm = holder.get("llm")
+        key: object = llm.get("api_key") if isinstance(llm, dict) else None
+    else:
+        key = getattr(getattr(holder, "llm", None), "api_key", None)
+    if key is None:
+        return None
+    secret = key.get_secret_value() if hasattr(key, "get_secret_value") else str(key)
+    return secret or None
+
+
+def _model_key_values(
+    request: StartConversationRequest, source: LaunchSource | None
+) -> list[tuple[str, str]]:
+    """Every model key this start would send into the runtime, by origin."""
+    holders: list[tuple[str, object]] = []
+    if source is not None:
+        holders.append(
+            (
+                "profile",
+                source.settings if isinstance(source, ResolvedLaunch) else source,
+            )
+        )
+    else:
+        holders.append(("agent_settings", request.agent_settings))
+        holders.append(("agent", request.agent))
+    values: list[tuple[str, str]] = []
+    for origin, holder in holders:
+        secret = _llm_key_of(holder)
+        if secret is not None:
+            values.append((origin, secret))
+    return values
+
+
+def _refuse_model_key(
+    request: StartConversationRequest, source: LaunchSource | None
+) -> None:
+    """Refuse a governed start that would carry a real model key inside."""
+    for origin, value in _model_key_values(request, source):
+        if not value.startswith(_OPEN_SHELL_KEY_PREFIX):
+            raise AgentLaunchError(
+                f"The {origin} model key would enter the sandbox. A governed "
+                "conversation accepts only the gateway placeholder "
+                "(openshell:resolve:...); store that placeholder in the LLM "
+                "profile instead of a real key."
+            )
+
+
+def _strip_governed_mcp(source: LaunchSource) -> tuple[LaunchSource, list[str]]:
+    """Drop every MCP server a governed start would forward (R14).
+
+    Works on both launch sources: resolved agent settings (from a stored
+    profile or request ``agent_settings``) and a request-supplied agent. The
+    strip is unconditional: governance is policy, not an option.
+    """
+    if isinstance(source, ResolvedLaunch):
+        dropped = sorted(source.settings.mcp_config)
+        if not dropped:
+            return source, []
+        cleared = source.settings.model_copy(update={"mcp_config": {}})
+        return ResolvedLaunch(settings=cleared, profile=source.profile), dropped
+    dropped = sorted(source.mcp_config)
+    if not dropped:
+        return source, []
+    return source.model_copy(update={"mcp_config": {}}), dropped
+
+
+def _is_runtime_workspace(
+    requested: str, inner_root: str, workspace_root: Path
+) -> bool:
+    """Whether a requested directory belongs to the runtime, not the host.
+
+    A relative path resolves inside the runtime, never on the host. An
+    absolute path belongs to the runtime only under a known runtime root: the
+    Docker alias, the driver's inner root, or this server's configured
+    workspace root.
+
+    Canvas anchors its default working directory on this server's file home,
+    so a governed start names a directory under the configured workspace root.
+    The start rewrites every accepted path to the inner root; the sandbox never
+    sees the host tree, and any other absolute path stays a refusal.
+    """
+    if not isinstance(requested, str) or not requested:
+        return False
+    path = PurePosixPath(requested)
+    if not path.is_absolute():
+        return True
+    roots = (*_DEFAULT_WORKSPACE_ALIASES, inner_root, workspace_root.as_posix())
+    return any(path.is_relative_to(PurePosixPath(root)) for root in roots)
+
+
+def _resolve_workspace(
+    registry: DockerConversationRegistry,
+    worktree: object,
+    workspace: dict[str, Any] | None,
+) -> tuple[str, Path | None]:
+    """Resolve the requested workspace, refusing a governed host path."""
+    inner_root = registry.inner_workspace_root
+    # A null working directory means "the driver's root", like a missing one.
+    working_dir = (workspace or {}).get("working_dir") or inner_root
+    if registry.governed:
+        runtime_workspace = _is_runtime_workspace(
+            working_dir, inner_root, registry.config.workspace_path
+        )
+        if worktree or not runtime_workspace:
+            raise Unprocessable(
+                "A governed conversation runs only in the sandbox workspace"
+            )
+        working_dir = inner_root
+    return working_dir, None if working_dir == inner_root else Path(working_dir)
+
+
 @docker_conversation_router.post("")
 async def start_conversation(
     request: Request,
@@ -204,8 +338,10 @@ async def start_docker_conversation(
 ) -> tuple[int, Any, UUID]:
     """Start a Docker conversation through the same path as the REST route."""
     body = body.copy()
-    if body.pop("conversation_runtime", None) not in (None, "docker"):
-        raise Unprocessable("This server only runs docker conversations")
+    requested_runtime = body.pop("conversation_runtime", None)
+    served_runtime = "openshell" if registry.governed else "docker"
+    if requested_runtime not in (None, served_runtime):
+        raise Unprocessable(f"This server only runs {served_runtime} conversations")
 
     workspace = body.get("workspace")
     if workspace is not None and (
@@ -213,8 +349,9 @@ async def start_docker_conversation(
         or workspace.get("kind", "LocalWorkspace") != "LocalWorkspace"
     ):
         raise Unprocessable("Docker conversations require a local workspace")
-    working_dir = (workspace or {}).get("working_dir", "/workspace")
-    host_workspace = None if working_dir == "/workspace" else Path(working_dir)
+    working_dir, host_workspace = _resolve_workspace(
+        registry, body.get("worktree"), workspace
+    )
 
     try:
         conversation_id = (
@@ -223,7 +360,10 @@ async def start_docker_conversation(
     except (TypeError, ValueError) as exc:
         raise Invalid("Invalid conversation_id") from exc
     body["conversation_id"] = str(conversation_id)
-    body["workspace"] = {"kind": "LocalWorkspace", "working_dir": "/workspace"}
+    body["workspace"] = {
+        "kind": "LocalWorkspace",
+        "working_dir": registry.inner_workspace_root,
+    }
 
     # Only a conversation the container already created is left alone on
     # failure; a manifest from a failed earlier start is retried like a new one.
@@ -262,7 +402,9 @@ async def start_docker_conversation(
             forwarded["workspace"] = LocalWorkspace(
                 working_dir=identity.workspace_path
             ).model_dump(mode="json")
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(
+            timeout=60, verify=container.ca_bundle or True
+        ) as client:
             response = await client.post(
                 f"{container.host}/api/conversations",
                 params={"include_skills": include_skills},
@@ -273,6 +415,10 @@ async def start_docker_conversation(
         raise launch_error(exc) from exc
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
+    except RuntimeArchivedError as exc:
+        raise Gone(
+            "Conversation runtime was archived; its history is read-only"
+        ) from exc
     except httpx.HTTPError as exc:
         if not existing:
             await registry.stop(conversation_id)
@@ -293,6 +439,8 @@ async def start_docker_conversation(
         if not existing:
             await registry.stop(conversation_id)
         content = {"detail": "Conversation runtime rejected the request"}
+    else:
+        await asyncio.to_thread(registry.copy_conversation_record, conversation_id)
     return response.status_code, content, conversation_id
 
 
@@ -334,6 +482,28 @@ async def _prepare_forward(
             config.cipher,
         )
     )
+    if registry.governed:
+        _refuse_model_key(start, source)
+        if source is not None:
+            source, dropped_mcp = _strip_governed_mcp(source)
+            if dropped_mcp:
+                # R14: the operator should know what governance dropped.
+                logger.warning(
+                    "Governed conversation drops MCP servers: %s",
+                    ", ".join(dropped_mcp),
+                )
+    if registry.governed and not existing:
+        # Server-side governance injection: the standing rules ride the launch
+        # additions and the notices hook rides the hook config, both already
+        # existing wire fields, so the start schema stays untouched.
+        start = start.model_copy(
+            update={
+                "hook_config": governed_hook_config(start.hook_config),
+                "agent_launch_additions": governed_launch_additions(
+                    start.agent_launch_additions
+                ),
+            }
+        )
 
     def payload(cipher: Cipher) -> dict[str, Any]:
         return forward_to_runtime(
@@ -364,6 +534,10 @@ async def runtime_credentials(
 ) -> JSONResponse:
     """Return the key for an authenticated client attached to this runtime."""
     registry = get_registry(conversation_registry)
+    # A governed conversation's key lives only in the outer proxy. Serving it
+    # here would leak the key; answer 404 like a missing conversation instead.
+    if registry.governed:
+        raise NotFound("Conversation not found")
     if not registry.conversation_dir(conversation_id).joinpath("meta.json").is_file():
         raise NotFound("Conversation not found")
     identity = await run_store(registry.provisioning.load, conversation_id)
@@ -422,6 +596,7 @@ async def delete_conversation(
     # partially deleted state.
     try:
         await registry.stop(conversation_id)
+        await asyncio.to_thread(registry.delete_runtime, conversation_id)
         try:
             await asyncio.to_thread(registry.cleanup_worktree, conversation_id)
         except (OSError, subprocess.SubprocessError):
@@ -434,6 +609,7 @@ async def delete_conversation(
         await asyncio.to_thread(safe_rmtree, runtime_dir)
         await asyncio.to_thread(safe_rmtree, registry.conversation_dir(conversation_id))
         registry.provisioning.manifest_path(conversation_id).unlink(missing_ok=True)
+        registry.provisioning.policy_state_path(conversation_id).unlink(missing_ok=True)
         registry.archived_marker(conversation_id).unlink(missing_ok=True)
         await conversation_service.refresh_persisted_conversation(conversation_id)
     finally:
@@ -527,7 +703,7 @@ async def proxy_conversation(
             upstream_path=upstream_path,
         )
     if request.method not in {"GET", "HEAD", "OPTIONS"} and response.status_code < 400:
-        await conversation_service.refresh_persisted_conversation(conversation_id)
+        await registry.sync_conversation_record(conversation_id, conversation_service)
     return response
 
 
@@ -595,7 +771,9 @@ async def _proxy_socket(
         if release is not None:
             release()
         registry.detach_session(conversation_id)
-        await conversation_service.refresh_persisted_conversation(conversation_id)
+        # A socket detach is not a turn boundary: pull the record after detach
+        # so a turn that finished while attached is visible.
+        await registry.sync_conversation_record(conversation_id, conversation_service)
 
 
 @docker_sockets_router.websocket("/events/{conversation_id}")

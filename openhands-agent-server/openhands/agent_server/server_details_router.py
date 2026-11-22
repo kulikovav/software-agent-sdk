@@ -3,7 +3,6 @@ import os
 import sys
 import time
 from importlib.metadata import version
-from typing import Literal
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
@@ -66,7 +65,7 @@ class ServerInfo(BaseModel):
     runtime_idle_timeout_seconds: float | None = Field(
         default_factory=lambda: get_runtime_idle_timeout_seconds()
     )
-    conversation_runtime: Literal["local", "docker"] = "local"
+    conversation_runtime: ConversationRuntime = "local"
     available_conversation_runtimes: list[ConversationRuntime] = Field(
         default_factory=list,
         description=(
@@ -164,7 +163,7 @@ def _usable_tools(browser_available: bool | None) -> list[str]:
 
 
 def build_server_info(
-    conversation_runtime: Literal["local", "docker"] = "local",
+    conversation_runtime: ConversationRuntime = "local",
     app_backend_ingress_url: str | None = None,
     conversation_runtime_selectable: bool = False,
     browser_available: bool | None = None,
@@ -183,6 +182,8 @@ def build_server_info(
     )
     info.capabilities.append("canvas_app_backend_secret_grants_v1")
     info.capabilities.append("canvas_app_backend_enable_lifecycle_v1")
+    if conversation_runtime == "openshell":
+        info.capabilities.append("governed_conversation_runtime_v1")
     if app_backend_ingress_url:
         info.capabilities.append("canvas_app_backend_bridge_v1")
     return info

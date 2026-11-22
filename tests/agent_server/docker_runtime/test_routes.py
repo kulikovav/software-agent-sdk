@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -15,6 +16,7 @@ from starlette.routing import Match
 
 from openhands.agent_server.api import add_domain_error_handler, create_app
 from openhands.agent_server.config import Config
+from openhands.agent_server.conversation_registry import ConversationRegistry
 from openhands.agent_server.docker_runtime import routers
 from openhands.agent_server.docker_runtime.provisioning import RuntimeProvisioningStore
 from openhands.agent_server.docker_runtime.registry import (
@@ -27,10 +29,14 @@ from openhands.agent_server.docker_runtime.routers import (
     proxy_conversation,
 )
 from openhands.agent_server.event_router import event_read_router
-from openhands.agent_server.models import UpdateSecretsRequest
+from openhands.agent_server.models import (
+    StartConversationRequest,
+    UpdateSecretsRequest,
+)
 from openhands.agent_server.persistence import PersistedSettings, ServerStores
 from openhands.agent_server.server_context import server_context_of
 from openhands.sdk.conversation.request import ConversationContainerOptions
+from openhands.sdk.errors import Unavailable, Unprocessable
 from openhands.sdk.git.utils import run_git_command
 from openhands.sdk.profiles.agent_profile import LaunchedAgentProfile
 from openhands.sdk.secret import LookupSecret
@@ -138,7 +144,7 @@ def test_root_conversation_proxy_preserves_canonical_path(tmp_path, monkeypatch)
     captured = {}
 
     async def container(*_args):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def proxy(*_args, **kwargs):
         captured.update(kwargs)
@@ -185,7 +191,9 @@ def test_worktree_start_forwards_only_mounted_host_paths(
         registry,
         "get_or_create",
         AsyncMock(
-            return_value=SimpleNamespace(host="http://inner", api_key="inner-key")
+            return_value=SimpleNamespace(
+                host="http://inner", api_key="inner-key", ca_bundle=None
+            )
         ),
     )
     captured = {}
@@ -650,7 +658,7 @@ async def test_secret_updates_are_materialized_and_profile_scoped(
     captured = {}
 
     async def container(*_args):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def proxy(*_args, **kwargs):
         captured.update(kwargs)
@@ -744,7 +752,7 @@ def test_a_rejected_start_stops_only_a_container_it_created(
     stopped = []
 
     async def get_or_create(_conversation_id):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def stop(stopped_id):
         stopped.append(stopped_id)
@@ -777,7 +785,7 @@ def test_a_successful_start_returns_the_inner_status_and_releases_its_lease(
     conversation_id = uuid4()
 
     async def get_or_create(_conversation_id):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def post(self, url, **kwargs):
         return httpx.Response(
@@ -831,7 +839,7 @@ def test_a_retried_start_records_the_latest_container_options(tmp_path, monkeypa
     conversation_id = uuid4()
 
     async def get_or_create(_conversation_id):
-        return SimpleNamespace(host="http://inner", api_key="inner-key")
+        return SimpleNamespace(host="http://inner", api_key="inner-key", ca_bundle=None)
 
     async def post(self, url, **kwargs):
         return httpx.Response(500, request=httpx.Request("POST", url))
@@ -936,3 +944,294 @@ def test_features_follow_the_host_switch_before_reaching_the_runtime(
     else:
         assert response.status_code == 409
         assert forwarded == []
+
+
+def test_a_host_local_registry_cannot_serve_container_routes(tmp_path):
+    config = Config(
+        conversation_runtime="local",
+        conversations_path=tmp_path / "conversations",
+        workspace_path=tmp_path / "workspaces",
+        secret_key=SecretStr("outer-key"),
+    )
+    registry = ConversationRegistry(config, ServerStores.from_config(config))
+
+    with pytest.raises(Unavailable):
+        routers.get_registry(registry)
+
+
+def _governed_registry(tmp_path):
+    from openhands.agent_server.docker_runtime.openshell.client import OpenShellGateway
+    from openhands.agent_server.docker_runtime.openshell.registry import (
+        OpenShellConversationRegistry,
+    )
+
+    class FakeGateway(OpenShellGateway):
+        def __init__(self):
+            self.service_port = None
+
+        def create(self, **_kwargs):
+            raise AssertionError("a refused start must not create a sandbox")
+
+        def find(self, selector):
+            return None
+
+        def get(self, name):
+            return None
+
+        def start(self, name):
+            raise AssertionError("no sandbox exists to start")
+
+        def delete(self, name):
+            pass
+
+        def read_file(self, name, path):
+            return None
+
+        def close(self):
+            pass
+
+    config = Config(
+        conversation_runtime="openshell",
+        conversations_path=tmp_path / "governed-conversations",
+        workspace_path=tmp_path / "governed-workspaces",
+        secret_key=SecretStr("outer-key"),
+    )
+    return OpenShellConversationRegistry(
+        config, ServerStores.from_config(config), gateway=FakeGateway()
+    )
+
+
+def _governed_app(tmp_path, monkeypatch):
+    from openhands.agent_server import api as api_module, server_context
+
+    registry = _governed_registry(tmp_path)
+    monkeypatch.setattr(
+        server_context,
+        "create_conversation_registry",
+        lambda _config, _stores: registry,
+    )
+    return api_module.create_app(registry.config)
+
+
+def test_governed_start_refuses_a_host_workspace(tmp_path, monkeypatch):
+    app = _governed_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/conversations",
+            json={
+                "workspace": {"kind": "LocalWorkspace", "working_dir": "/tmp/project"}
+            },
+        )
+
+    assert response.status_code == 422
+    assert "sandbox workspace" in response.json()["detail"]
+
+
+def test_governed_start_refuses_a_worktree(tmp_path, monkeypatch):
+    app = _governed_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post("/api/conversations", json={"worktree": True})
+
+    assert response.status_code == 422
+    assert "sandbox workspace" in response.json()["detail"]
+
+
+def test_governed_runtime_credentials_are_not_served(tmp_path, monkeypatch):
+    app = _governed_app(tmp_path, monkeypatch)
+    conversation_id = uuid4()
+
+    with TestClient(app) as client:
+        registry = server_context_of(app).conversation_registry
+        registry.provisioning.create(conversation_id)
+        record = registry.conversation_dir(conversation_id)
+        record.mkdir(parents=True, exist_ok=True)
+        (record / "meta.json").write_text("{}", encoding="utf-8")
+        response = client.post(
+            f"/api/conversations/{conversation_id}/runtime/credentials"
+        )
+
+    assert response.status_code == 404
+
+
+def test_governed_workspace_maps_the_docker_root_to_the_sandbox(tmp_path):
+    registry = _governed_registry(tmp_path)
+
+    working_dir, host_workspace = routers._resolve_workspace(
+        registry, None, {"working_dir": "/workspace"}
+    )
+
+    assert working_dir == "/sandbox"
+    assert host_workspace is None
+
+
+@pytest.mark.parametrize(
+    "default",
+    [
+        "project",
+        "project/0123456789abcdef",
+    ],
+)
+def test_governed_workspace_accepts_the_canvas_default_and_rewrites_it(
+    tmp_path, default
+):
+    """Canvas anchors ``workspace/project/<id>`` on this server's own root."""
+    registry = _governed_registry(tmp_path)
+    requested = registry.config.workspace_path / default
+
+    working_dir, host_workspace = routers._resolve_workspace(
+        registry, None, {"working_dir": requested.as_posix()}
+    )
+
+    assert working_dir == "/sandbox"
+    assert host_workspace is None
+
+
+def test_governed_workspace_accepts_a_relative_request(tmp_path):
+    """A relative path resolves inside the runtime, never on the host."""
+    registry = _governed_registry(tmp_path)
+
+    working_dir, host_workspace = routers._resolve_workspace(
+        registry, None, {"working_dir": "workspace/project/a1b2c3"}
+    )
+
+    assert working_dir == "/sandbox"
+    assert host_workspace is None
+
+
+@pytest.mark.parametrize("workspace", [None, {}, {"working_dir": None}])
+def test_governed_workspace_accepts_no_requested_directory(tmp_path, workspace):
+    registry = _governed_registry(tmp_path)
+
+    working_dir, host_workspace = routers._resolve_workspace(registry, None, workspace)
+
+    assert working_dir == "/sandbox"
+    assert host_workspace is None
+
+
+def test_governed_workspace_refuses_another_host_path(tmp_path):
+    registry = _governed_registry(tmp_path)
+
+    with pytest.raises(Unprocessable, match="sandbox workspace"):
+        routers._resolve_workspace(registry, None, {"working_dir": "/tmp/project"})
+
+
+def test_docker_workspace_keeps_a_host_path(tmp_path):
+    config = Config(
+        conversation_runtime="docker",
+        conversations_path=tmp_path / "conversations",
+        workspace_path=tmp_path / "workspaces",
+        secret_key=SecretStr("outer-key"),
+    )
+    registry = DockerConversationRegistry(config, ServerStores.from_config(config))
+
+    working_dir, host_workspace = routers._resolve_workspace(
+        registry, None, {"working_dir": "/tmp/project"}
+    )
+
+    assert working_dir == "/tmp/project"
+    assert host_workspace == Path("/tmp/project")
+
+
+def test_a_governed_server_refuses_a_docker_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "persistence"))
+    app = _governed_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/conversations", json={"conversation_runtime": "docker"}
+        )
+
+    assert response.status_code == 422
+    assert "openshell" in response.json()["detail"]
+
+
+def _governed_start_body(api_key: str) -> dict[str, object]:
+    return {
+        "workspace": {"kind": "LocalWorkspace", "working_dir": "/sandbox"},
+        "agent_settings": {
+            "agent_kind": "openhands",
+            "llm": {"model": "test", "api_key": api_key},
+        },
+    }
+
+
+def test_a_governed_start_refuses_a_real_model_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "persistence"))
+    app = _governed_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/conversations", json=_governed_start_body("sk-real")
+        )
+
+    assert response.status_code == 422
+    assert "placeholder" in response.json()["detail"]["message"]
+
+
+def test_a_governed_start_accepts_the_gateway_placeholder():
+    request = StartConversationRequest.model_validate(
+        _governed_start_body("openshell:resolve:env:v1_LITELLM_API_KEY")
+    )
+
+    routers._refuse_model_key(request, None)
+
+
+def test_a_start_of_an_archived_conversation_returns_410(tmp_path, monkeypatch):
+    monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "persistence"))
+    app = _governed_app(tmp_path, monkeypatch)
+    conversation_id = uuid4()
+    registry = server_context_of(app).conversation_registry
+    identity = registry.provisioning.create(conversation_id)
+    registry.provisioning.save(
+        identity.model_copy(update={"service_url": "https://gone:17670"})
+    )
+    body = _governed_start_body("openshell:resolve:env:v1_LITELLM_API_KEY")
+    body["conversation_id"] = str(conversation_id)
+
+    with TestClient(app) as client:
+        response = client.post("/api/conversations", json=body)
+
+    assert response.status_code == 410
+
+
+async def test_a_governed_start_verifies_the_gateway_ca(tmp_path, monkeypatch):
+    registry = _governed_registry(tmp_path)
+    container = SimpleNamespace(
+        host="https://default--oh-test.openshell.localhost:17670",
+        api_key="inner-key",
+        ca_bundle=str(tmp_path / "ca.crt"),
+        container_id="oh-test",
+    )
+    monkeypatch.setattr(registry, "get_or_create", AsyncMock(return_value=container))
+    monkeypatch.setattr(registry, "acquire_lease", lambda _id: lambda: None)
+    monkeypatch.setattr(registry, "copy_conversation_record", lambda _id: True)
+    monkeypatch.setattr(
+        routers,
+        "_prepare_forward",
+        AsyncMock(return_value=(lambda cipher: {}, None, None, False)),
+    )
+    seen: dict[str, object] = {}
+
+    class Client:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, _url, **_kwargs):
+            return httpx.Response(200, json={"id": "conversation"})
+
+    monkeypatch.setattr(routers.httpx, "AsyncClient", Client)
+
+    await routers.start_docker_conversation(
+        {"agent": {"kind": "Agent", "llm": {"model": "test"}}}, registry
+    )
+
+    # A published service URL is signed by the gateway CA, not by a public one.
+    assert seen["verify"] == container.ca_bundle

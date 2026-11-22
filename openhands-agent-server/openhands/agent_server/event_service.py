@@ -89,6 +89,7 @@ from openhands.sdk.credential import (
 from openhands.sdk.event import (
     AgentErrorEvent,
     ObservationBaseEvent,
+    PolicyEvent,
     ReactionEvent,
     StreamingDeltaEvent,
 )
@@ -1038,6 +1039,24 @@ class EventService:
                 except ValueError:
                     pass
 
+    async def append_policy_event(self, event: PolicyEvent) -> None:
+        """Persist and publish one governance decision from the runtime watch.
+
+        The governance context in the system prompt carries the standing
+        rules, so the event stays out of the agent's LLM context; this only
+        makes the decision visible in the log, the UI, and the sockets.
+        """
+        if not self._conversation:
+            raise ValueError("inactive_service")
+        loop = asyncio.get_running_loop()
+        conversation = self._conversation
+
+        def _persist() -> None:
+            with conversation._state:
+                conversation._on_event(event)
+
+        await loop.run_in_executor(None, _persist)
+
     def _mark_running_acp_prompt_superseded_sync(self) -> tuple[bool, bool]:
         """Mark the currently running ACP prompt superseded if needed.
 
@@ -1313,6 +1332,39 @@ class EventService:
                 "Failed to initialize git repository at %s: %s", working_dir, e
             )
 
+    def _prepare_working_dir(self, workspace: LocalWorkspace) -> LocalWorkspace:
+        """Return a workspace this server can open, creating its directory.
+
+        A conversation served by a runtime records its working directory as it
+        appears *inside* that runtime: a governed conversation keeps
+        ``/sandbox``. The catalog copies that record to the serving host, so
+        starting a service here used to create a top-level directory such as
+        ``/sandbox`` on the host, which the kernel refuses with EACCES and the
+        event read fails. Create a directory only when this server owns it —
+        an existing directory, or a path under the conversations root.
+        Otherwise keep the workspace beside the conversation state.
+        """
+        requested = Path(workspace.working_dir)
+        if requested.is_dir():
+            return workspace
+        try:
+            requested.mkdir(parents=True, exist_ok=True)
+            return workspace
+        except OSError:
+            # A runtime-internal path such as ``/sandbox`` cannot be created on
+            # this host; keep the workspace beside the conversation state so
+            # the event read still has a directory to open.
+            pass
+        fallback = self.conversation_dir / "workspace"
+        fallback.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Conversation %s records workspace %s outside this server; using %s",
+            self.stored.id,
+            requested,
+            fallback,
+        )
+        return workspace.model_copy(update={"working_dir": str(fallback)})
+
     async def start(self):
         # Store the main event loop for cross-thread communication
         self._main_loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
@@ -1337,6 +1389,7 @@ class EventService:
         await self._scrub_persisted_credentials()
         workspace = self.stored.workspace
         assert isinstance(workspace, LocalWorkspace)
+        workspace = self._prepare_working_dir(workspace)
         await asyncio.to_thread(
             self._prepare_workspace_dir, Path(workspace.working_dir)
         )
