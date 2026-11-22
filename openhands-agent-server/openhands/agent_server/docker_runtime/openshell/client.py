@@ -143,19 +143,23 @@ class OpenShellGateway:
             command=list(command),
             environment=dict(environment),
         )
+        # An empty string reaches this method for an env var a deployment left
+        # blank, and an empty quantity makes the gateway reject the sandbox, so
+        # blank is treated as unset.
         limits = {
             key: value
             for key, value in (("cpu", cpu), ("memory", memory))
-            if value is not None
+            if value
         }
         if limits:
             # The gateway reads the Kubernetes limits shape out of this Struct
             # (crates/openshell-server/src/compute/mod.rs
             # `extract_typed_resources`) and the podman driver applies
-            # `limits.memory` and `limits.cpu`; without them the driver falls
-            # back to its built-in 4 GiB memory default and 2-core
-            # `DEFAULT_CPU_QUOTA`. Write both keys in one update: two separate
-            # updates would let the second overwrite the first's `limits` key.
+            # `limits.cpu` and `limits.memory` independently; a key that is
+            # absent keeps that driver default, 2 cores (`DEFAULT_CPU_QUOTA`)
+            # or 4 GiB (`DEFAULT_MEMORY_LIMIT`). Write both keys in one update:
+            # two separate updates would let the second overwrite the first's
+            # `limits` key.
             spec.template.resources.update({"limits": limits})
         if policy is not None:
             spec.policy.CopyFrom(policy)
