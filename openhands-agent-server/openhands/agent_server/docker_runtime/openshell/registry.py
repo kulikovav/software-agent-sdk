@@ -254,6 +254,7 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
                 expose_port=_AGENT_PORT,
                 policy=self._sandbox_policy(identity),
                 memory=self.config.openshell_sandbox_memory,
+                cpu=self.config.openshell_sandbox_cpu,
             )
             created = True
         elif sandbox.phase != pb.SANDBOX_PHASE_READY:

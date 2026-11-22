@@ -79,6 +79,49 @@ def test_create_passes_the_memory_limit_in_the_resources_struct(monkeypatch):
     assert template.resources["limits"]["memory"] == "6Gi"
 
 
+def test_create_passes_the_cpu_limit_without_a_memory_limit(monkeypatch):
+    gateway, sdk = make_gateway(monkeypatch, 17670)
+
+    gateway.create(
+        name="demo",
+        image="image:tag",
+        command=["agent"],
+        environment={},
+        labels={},
+        provider=None,
+        expose_port=8000,
+        cpu="500m",
+    )
+
+    created = sdk.created
+    assert created is not None
+    template = created["spec"].template
+    assert template.resources["limits"]["cpu"] == "500m"
+    assert "memory" not in template.resources["limits"]
+
+
+def test_create_passes_both_limits_in_one_limits_struct(monkeypatch):
+    gateway, sdk = make_gateway(monkeypatch, 17670)
+
+    gateway.create(
+        name="demo",
+        image="image:tag",
+        command=["agent"],
+        environment={},
+        labels={},
+        provider=None,
+        expose_port=8000,
+        memory="6Gi",
+        cpu="2.5",
+    )
+
+    created = sdk.created
+    assert created is not None
+    template = created["spec"].template
+    assert template.resources["limits"]["cpu"] == "2.5"
+    assert template.resources["limits"]["memory"] == "6Gi"
+
+
 def test_create_keeps_the_service_url_and_rewrites_the_published_port(monkeypatch):
     gateway, sdk = make_gateway(monkeypatch, 17670)
 
