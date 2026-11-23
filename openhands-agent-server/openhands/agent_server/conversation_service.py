@@ -506,14 +506,14 @@ def _register_agent_definitions(
     )
 
 
-def _state_signature(base_state_path: str) -> tuple[int, int] | None:
-    """Change-detection token for ``base_state.json``. ``None`` if unreadable.
+def _file_signature(path: str) -> tuple[int, int] | None:
+    """Change-detection token for a persisted file. ``None`` if unreadable.
 
     ``str`` + ``os.stat`` rather than ``Path``: this runs per conversation on
-    every status-filtered query, and ``Path`` costs more than the syscall.
+    every sidebar query, and ``Path`` costs more than the syscall.
     """
     with suppress(OSError):
-        stat = os.stat(base_state_path)
+        stat = os.stat(path)
         return (stat.st_mtime_ns, stat.st_size)
     return None
 
@@ -580,6 +580,12 @@ class _ConversationRecord:
     # metadata-only updates (``meta.json``, e.g. auto-title) must also
     # invalidate it.
     stored_signature: int | None = None
+    # Signature of ``meta.json`` when ``stored`` was read. ``None`` = never
+    # checked. The file changes without a ``base_state.json`` change, so it
+    # has its own signature.
+    meta_signature: tuple[int, int] | None = None
+    # Memoised by _meta_path.
+    meta_path: str | None = None
 
 
 @dataclass
@@ -648,6 +654,9 @@ class ConversationService:
             if not meta_file.exists():
                 continue
             try:
+                # Signature before read; the base_state note below gives the
+                # racing-write reason.
+                meta_signature = _file_signature(str(meta_file))
                 stored = StoredConversation.model_validate_json(
                     meta_file.read_text(),
                     context=cipher_context(
@@ -659,7 +668,7 @@ class ConversationService:
                 base_state_path = str(base_state_file)
                 # Signature before read, so a racing write leaves a stale
                 # signature and the next query re-reads rather than trusting it.
-                signature = _state_signature(base_state_path)
+                signature = _file_signature(base_state_path)
                 if base_state_file.exists():
                     # Strict on purpose: a corrupt base state still drops the
                     # conversation from the catalog and logs below.
@@ -675,7 +684,9 @@ class ConversationService:
                     stored=stored,
                     execution_status=execution_status,
                     state_signature=signature,
+                    meta_signature=meta_signature,
                     base_state_path=base_state_path,
+                    meta_path=str(meta_file),
                 )
             except Exception:
                 logger.exception(
@@ -695,6 +706,14 @@ class ConversationService:
             record.base_state_path = path
         return path
 
+    def _meta_path(self, conversation_id: UUID, record: _ConversationRecord) -> str:
+        """Memoised path to a conversation's ``meta.json``."""
+        path = record.meta_path
+        if path is None:
+            path = str(self.conversations_dir / conversation_id.hex / "meta.json")
+            record.meta_path = path
+        return path
+
     def _cipher_for(self, conversation_id: UUID) -> Cipher | None:
         if self.runtime_cipher_resolver is not None:
             return self.runtime_cipher_resolver(conversation_id)
@@ -710,6 +729,47 @@ class ConversationService:
             base_state_file.read_text(),
             context=cipher_context(self._cipher_for(conversation_id)),
         )
+
+    def _reload_stored_metadata_sync(
+        self, conversation_id: UUID, record: _ConversationRecord
+    ) -> StoredConversation | None:
+        """Re-read ``meta.json`` after its signature changed."""
+        try:
+            return StoredConversation.model_validate_json(
+                Path(self._meta_path(conversation_id, record)).read_text(),
+                context=cipher_context(self._cipher_for(conversation_id)),
+            )
+        except Exception:
+            # Keep the last good row: a corrupt or half-written file must not
+            # remove the conversation from every listing until it is repaired.
+            logger.exception(
+                "error_reloading_conversation_metadata:%s", conversation_id.hex
+            )
+            return None
+
+    async def _refresh_stored_metadata(
+        self, conversation_id: UUID, record: _ConversationRecord
+    ) -> bool:
+        """Reload an idle record whose ``meta.json`` changed on disk.
+
+        The servers of one deployment share a conversation store, so a tag,
+        title, or metrics write by another server changes ``meta.json`` without
+        touching this row's ``base_state.json`` signature. Without this check
+        the cached row keeps its old tags until restart, which is how an
+        archived conversation still renders as unarchived on another backend.
+        """
+        signature = _file_signature(self._meta_path(conversation_id, record))
+        if signature is None or signature == record.meta_signature:
+            return False
+        stored = await asyncio.to_thread(
+            self._reload_stored_metadata_sync, conversation_id, record
+        )
+        if stored is None:
+            return False
+        record.stored = stored
+        record.meta_signature = signature
+        record.cached_info = None
+        return True
 
     def _agent_from_base_state(self, conversation_id: UUID) -> AgentBase | None:
         """Return the persisted agent from ``base_state.json`` (its single source
@@ -769,6 +829,9 @@ class ConversationService:
                 if record is not None:
                     record.stored = event_service.stored
                     record.cached_info = None
+                    record.meta_signature = _file_signature(
+                        self._meta_path(conversation_id, record)
+                    )
                 return
             self._credential_bindings.setdefault(conversation_id, {})[secret_name] = (
                 binding
@@ -799,6 +862,9 @@ class ConversationService:
                 if record is not None:
                     record.stored = event_service.stored
                     record.cached_info = None
+                    record.meta_signature = _file_signature(
+                        self._meta_path(conversation_id, record)
+                    )
                 event_services.pop(conversation_id, None)
             if first_error is not None:
                 raise first_error
@@ -909,10 +975,14 @@ class ConversationService:
             # keyed cache as idle conversations. Live detail/event endpoints
             # remain authoritative for an individual open conversation.
             record.stored = event_service.stored
+            record.meta_signature = _file_signature(
+                self._meta_path(conversation_id, record)
+            )
         else:
             live = False
+            await self._refresh_stored_metadata(conversation_id, record)
 
-        signature = _state_signature(self._base_state_path(conversation_id, record))
+        signature = _file_signature(self._base_state_path(conversation_id, record))
         if signature is None and event_service is not None and event_service.is_open():
             # Direct embedders/tests can inject a live EventService without a
             # persisted state file. There is no disk snapshot to list in that
@@ -926,11 +996,10 @@ class ConversationService:
             return conversation_info
 
         # ``record.stored`` is refreshed above for live conversations; idle rows
-        # keep the catalog copy. Only live conversations can mutate that in-memory
-        # object via metadata-only updates (e.g. auto-title, which writes
-        # ``meta.json`` without touching ``base_state.json``), so fingerprint it
-        # only when the live refresh actually ran — keeps the hot persisted-row
-        # sidebar path free of a per-request dump+hash.
+        # are refreshed from ``meta.json`` by ``_refresh_stored_metadata``. Only
+        # live conversations mutate that in-memory object (e.g. auto-title), so
+        # fingerprint it only when the live refresh ran — keeps the hot
+        # persisted-row sidebar path free of a per-request dump+hash.
         stored_signature = _stored_metadata_signature(record.stored) if live else None
         cached = record.cached_info
         if (
@@ -976,7 +1045,7 @@ class ConversationService:
             UUID, tuple[ConversationExecutionStatus | None, tuple[int, int] | None]
         ] = {}
         for conversation_id, base_state_path, cached_signature in targets:
-            signature = _state_signature(base_state_path)
+            signature = _file_signature(base_state_path)
             if signature is not None and signature == cached_signature:
                 continue
             if signature is None:
@@ -1063,6 +1132,8 @@ class ConversationService:
         if existing.stored != record.stored:
             existing.stored = record.stored
             existing.cached_info = None
+        existing.meta_signature = record.meta_signature
+        existing.meta_path = record.meta_path
 
     async def _reconcile_active_records(self) -> None:
         """Add injected live services to the in-memory catalog."""
@@ -2039,6 +2110,16 @@ class ConversationService:
         # Persist first: a refused write (e.g. lost lease ownership) must leave
         # the in-memory metadata and state untouched.
         await event_service.save_meta(event_service.stored.model_copy(update=update))
+        # Stamp the metadata signature before the state-lock wait below: a
+        # foreign meta write during that wait must invalidate this row, not be
+        # paired with the copy this server just saved.
+        record = self._conversation_records.get(conversation_id)
+        if record is not None:
+            record.stored = event_service.stored
+            record.cached_info = None
+            record.meta_signature = _file_signature(
+                self._meta_path(conversation_id, record)
+            )
         if request.tags is not None:
             # Keep the persisted ConversationState update under the state lock so
             # autosave and state-change callbacks observe a consistent mutation.
@@ -2049,10 +2130,6 @@ class ConversationService:
             # base_state.json owns the budget; the event service is loaded
             # above, so this writes the live state under its lock.
             await event_service.set_max_budget_per_run(request.max_budget_per_run)
-        record = self._conversation_records.get(conversation_id)
-        if record is not None:
-            record.stored = event_service.stored
-            record.cached_info = None
 
         # Notify conversation webhooks about the updated conversation. Compose the
         # full-state snapshot under the state lock, but do the synchronous wait in a
@@ -2469,6 +2546,9 @@ class ConversationService:
                 if record is not None:
                     record.stored = event_service.stored
                     record.cached_info = None
+                    record.meta_signature = _file_signature(
+                        self._meta_path(conversation_id, record)
+                    )
                 bindings = dict(event_service.credential_bindings)
                 try:
                     await event_service.__aexit__(None, None, None)

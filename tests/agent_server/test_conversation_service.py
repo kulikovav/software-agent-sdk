@@ -1375,6 +1375,80 @@ async def test_search_refreshes_cached_info_on_a_tags_only_update(
 
 
 @pytest.mark.asyncio
+async def test_search_sees_metadata_written_by_another_server(persisted_conversation):
+    """A row cached before another server's tag write must not stay stale.
+
+    A deployment runs several agent servers over one conversation store. The
+    writer saves ``meta.json``; the reader must serve the new tags on both the
+    sidebar list and the single-conversation read. ``update_conversation`` also
+    autosaves the state, so the meta-only test below isolates the file path.
+    """
+    conversations_dir, conversation_id = persisted_conversation
+
+    async with ConversationService(conversations_dir=conversations_dir) as writer:
+        async with ConversationService(conversations_dir=conversations_dir) as reader:
+            cached = await reader.search_conversations()
+            assert cached.items[0].tags == {}
+
+            await writer.update_conversation(
+                conversation_id,
+                UpdateConversationRequest(tags={"archived": "true"}),
+            )
+
+            listed = await reader.search_conversations()
+            assert listed.items[0].tags == {"archived": "true"}
+            detail = await reader.get_conversation(conversation_id)
+            assert detail is not None
+            assert detail.tags == {"archived": "true"}
+
+
+@pytest.mark.asyncio
+async def test_search_sees_a_meta_only_write_from_another_server(
+    persisted_conversation,
+):
+    """A meta-only write, with no state change, must refresh a reader's row."""
+    conversations_dir, conversation_id = persisted_conversation
+
+    async with ConversationService(conversations_dir=conversations_dir) as writer:
+        async with ConversationService(conversations_dir=conversations_dir) as reader:
+            cached = await reader.search_conversations()
+            assert cached.items[0].tags == {}
+
+            runtime = await writer.get_event_service(conversation_id)
+            assert runtime is not None
+            runtime.stored = runtime.stored.model_copy(
+                update={"tags": {"archived": "true"}}
+            )
+            await runtime.save_meta()
+
+            listed = await reader.search_conversations()
+            assert listed.items[0].tags == {"archived": "true"}
+
+
+@pytest.mark.asyncio
+async def test_search_keeps_the_last_good_row_when_meta_is_unreadable(
+    persisted_conversation,
+):
+    """A corrupt or missing ``meta.json`` must not drop a listed conversation."""
+    conversations_dir, conversation_id = persisted_conversation
+    meta_file = conversations_dir / conversation_id.hex / "meta.json"
+
+    async with ConversationService(conversations_dir=conversations_dir) as service:
+        initial = await service.search_conversations()
+        assert initial.items[0].tags == {}
+
+        meta_file.write_text("{")
+        after_corrupt = await service.search_conversations()
+        assert [item.id for item in after_corrupt.items] == [conversation_id]
+        assert after_corrupt.items[0].tags == {}
+
+        meta_file.unlink()
+        after_missing = await service.search_conversations()
+        assert [item.id for item in after_missing.items] == [conversation_id]
+        assert after_missing.items[0].tags == {}
+
+
+@pytest.mark.asyncio
 async def test_waiting_hydration_cannot_restore_deleted_conversation(
     persisted_conversation,
 ):
@@ -4915,19 +4989,27 @@ async def test_search_composes_conversation_info_off_event_loop(persisted_conver
 async def test_search_reuses_persisted_conversation_info_until_state_changes(
     persisted_conversation,
 ):
-    """Repeated sidebar polls should not reparse unchanged base_state.json."""
+    """Repeated sidebar polls should not reparse unchanged persisted files."""
     conversations_dir, conversation_id = persisted_conversation
     async with ConversationService(conversations_dir=conversations_dir) as service:
         real_load = service._load_persisted_state_sync
-        with patch.object(
-            service, "_load_persisted_state_sync", wraps=real_load
-        ) as load:
+        real_meta_load = service._reload_stored_metadata_sync
+        with (
+            patch.object(
+                service, "_load_persisted_state_sync", wraps=real_load
+            ) as load,
+            patch.object(
+                service, "_reload_stored_metadata_sync", wraps=real_meta_load
+            ) as meta_load,
+        ):
             first = await service.search_conversations()
             second = await service.search_conversations()
 
         assert [item.id for item in first.items] == [conversation_id]
         assert [item.id for item in second.items] == [conversation_id]
         assert load.call_count == 1
+        # The unchanged meta.json signature must not trigger a re-read.
+        assert meta_load.call_count == 0
 
 
 @pytest.mark.asyncio
