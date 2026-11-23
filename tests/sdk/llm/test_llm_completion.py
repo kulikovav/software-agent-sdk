@@ -1,6 +1,7 @@
 """Tests for LLM completion functionality, configuration, and metrics tracking."""
 
 import asyncio
+import json
 from collections.abc import Sequence
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -46,6 +47,42 @@ def create_mock_response(content: str = "Test response", response_id: str = "tes
         object="chat.completion",
         system_fingerprint="test",
         usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+
+def create_tool_call_chunk(
+    call_id: str,
+    index: int,
+    name: str,
+    arguments: str,
+    model: str = "mimo-v2.6-pro",
+) -> ModelResponseStream:
+    """Build one stream chunk whose delta carries a complete tool call.
+
+    The model is the one that showed the restarted-index regression.
+    """
+    return ModelResponseStream(
+        id=f"chatcmpl-{call_id}",
+        choices=[
+            StreamingChoices(
+                finish_reason=None,
+                index=0,
+                delta=Delta(
+                    content=None,
+                    tool_calls=[
+                        {
+                            "index": index,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": arguments},
+                        }
+                    ],
+                ),
+            )
+        ],
+        created=1234567890,
+        model=model,
+        object="chat.completion.chunk",
     )
 
 
@@ -854,6 +891,133 @@ def test_llm_streaming_preserves_cache_read_tokens(mock_completion):
     assert actual_stream_options == {"include_usage": True}, (
         f"Expected stream_options={{include_usage: True}}, got {actual_stream_options}"
     )
+
+
+@patch("openhands.sdk.llm.llm.litellm_completion")
+def test_llm_streaming_splits_tool_calls_that_restart_one_index(mock_completion):
+    """Two tool calls streamed under index 0 must stay two calls.
+
+    Regression: a gateway sent both calls under index 0 with fresh ids, so the
+    builder merged their arguments and the terminal tool got invalid JSON.
+    """
+    first_arguments = json.dumps(
+        {"command": "git status", "summary": "Check state", "security_risk": "LOW"}
+    )
+    second_arguments = json.dumps(
+        {"command": "pwd", "summary": "Print cwd", "security_risk": "LOW"}
+    )
+    chunks = [
+        create_tool_call_chunk("call_first", 0, "terminal", first_arguments),
+        create_tool_call_chunk("call_second", 0, "terminal", second_arguments),
+        ModelResponseStream(
+            id="chatcmpl-test",
+            choices=[
+                StreamingChoices(
+                    finish_reason="tool_calls", index=0, delta=Delta(content=None)
+                )
+            ],
+            created=1234567890,
+            model="mimo-v2.6-pro",
+            object="chat.completion.chunk",
+        ),
+    ]
+    mock_stream = MagicMock(spec=CustomStreamWrapper)
+    mock_stream.__iter__.return_value = iter(chunks)
+    mock_completion.return_value = mock_stream
+
+    llm = LLM(
+        usage_id="test-llm",
+        model="mimo-v2.6-pro",
+        api_key=SecretStr("test_key"),
+    )
+
+    response = llm.completion(
+        messages=[Message(role="user", content=[TextContent(text="Check the repo")])],
+        stream=True,
+        on_token=lambda chunk: None,
+    )
+
+    tool_calls = response.message.tool_calls
+    assert tool_calls is not None
+    assert [call.id for call in tool_calls] == ["call_first", "call_second"]
+    assert [json.loads(call.arguments) for call in tool_calls] == [
+        json.loads(first_arguments),
+        json.loads(second_arguments),
+    ]
+
+
+@patch("openhands.sdk.llm.llm.litellm_completion")
+def test_llm_streaming_keeps_a_restarted_call_that_repeats_its_id(mock_completion):
+    """Later fragments of a restarted call must keep its new index.
+
+    Some gateways repeat the call id on every argument fragment, and the raw
+    index stays 0. Without the id map, each fragment would look like another
+    restart and split the call again.
+    """
+    first_arguments = json.dumps({"command": "ls"})
+    second_head = '{"command": "pwd", "summary": '
+    second_tail = '"Print cwd"}'
+    chunks = [
+        create_tool_call_chunk("call_first", 0, "terminal", first_arguments),
+        create_tool_call_chunk("call_second", 0, "terminal", second_head),
+        ModelResponseStream(
+            id="chatcmpl-test",
+            choices=[
+                StreamingChoices(
+                    finish_reason=None,
+                    index=0,
+                    delta=Delta(
+                        content=None,
+                        tool_calls=[
+                            {
+                                "index": 0,
+                                "id": "call_second",
+                                "type": "function",
+                                "function": {"arguments": second_tail},
+                            }
+                        ],
+                    ),
+                )
+            ],
+            created=1234567890,
+            model="mimo-v2.6-pro",
+            object="chat.completion.chunk",
+        ),
+        ModelResponseStream(
+            id="chatcmpl-test",
+            choices=[
+                StreamingChoices(
+                    finish_reason="tool_calls", index=0, delta=Delta(content=None)
+                )
+            ],
+            created=1234567890,
+            model="mimo-v2.6-pro",
+            object="chat.completion.chunk",
+        ),
+    ]
+    mock_stream = MagicMock(spec=CustomStreamWrapper)
+    mock_stream.__iter__.return_value = iter(chunks)
+    mock_completion.return_value = mock_stream
+
+    llm = LLM(
+        usage_id="test-llm",
+        model="mimo-v2.6-pro",
+        api_key=SecretStr("test_key"),
+    )
+
+    response = llm.completion(
+        messages=[Message(role="user", content=[TextContent(text="Check the repo")])],
+        stream=True,
+        on_token=lambda chunk: None,
+    )
+
+    tool_calls = response.message.tool_calls
+    assert tool_calls is not None
+    assert [call.id for call in tool_calls] == ["call_first", "call_second"]
+    assert json.loads(tool_calls[1].arguments) == {
+        "command": "pwd",
+        "summary": "Print cwd",
+    }
 
 
 @patch("openhands.sdk.llm.llm.litellm_completion")
