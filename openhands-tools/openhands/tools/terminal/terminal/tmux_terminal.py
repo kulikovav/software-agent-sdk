@@ -226,6 +226,19 @@ _TMUX_SPECIALS: dict[str, str] = {
 _SHELL_PROMPT_TIMEOUT_SECONDS = 10
 
 
+def login_shell_command(username: str | None) -> list[str]:
+    """The shell command tmux runs for the agent's terminal.
+
+    Only a root process needs `su` to drop to the agent user. A non-root
+    process that already runs as the target user gets a password prompt from
+    `su` (the governed sandbox runs as 10001), so the terminal never reaches
+    its shell prompt.
+    """
+    if username in ("root", "openhands") and os.geteuid() == 0:
+        return ["su", username, "-"]
+    return ["/bin/bash"]
+
+
 class TmuxTerminal(TerminalInterface):
     """Tmux-based terminal backend.
 
@@ -262,10 +275,7 @@ class TmuxTerminal(TerminalInterface):
         # auto-launch `less` on a TTY don't capture the pane and wedge the session.
         env.setdefault("GIT_PAGER", "cat")
         env.setdefault("PAGER", "cat")
-        shell_command = ["/bin/bash"]
-        if self.username in ["root", "openhands"]:
-            # This starts a non-login (new) shell for the given user
-            shell_command = ["su", self.username, "-"]
+        shell_command = login_shell_command(self.username)
 
         window_command = shlex.join([*process_priority_prefix(env), *shell_command])
 

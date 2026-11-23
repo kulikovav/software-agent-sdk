@@ -34,6 +34,7 @@ from openhands.tools.terminal.terminal.process_priority import (
 from openhands.tools.terminal.terminal.tmux_terminal import (
     TmuxTerminal,
     _new_owned_session,
+    login_shell_command,
     run_tmux_commands,
 )
 
@@ -187,9 +188,7 @@ class TmuxPanePool:
         """Create a new PooledTmuxTerminal within the shared session."""
         assert self._session is not None
 
-        shell_command = ["/bin/bash"]
-        if self.username in ["root", "openhands"]:
-            shell_command = ["su", self.username, "-"]
+        shell_command = login_shell_command(self.username)
         priority_prefix = process_priority_prefix(build_terminal_env(self.env))
 
         window = self._session.new_window(
