@@ -145,6 +145,7 @@ from openhands.sdk.llm.streaming import (
     AnyTokenCallbackType,
     TokenCallbackType,
     _invoke_token_callback,
+    _normalize_tool_call_indices,
 )
 from openhands.sdk.llm.utils.image_inline import (
     amaybe_inline_image_urls,
@@ -2730,9 +2731,19 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         }
 
     @staticmethod
-    def _combine_chat_stream(
-        chunks: list[ModelResponseStream], messages: list[dict[str, Any]]
+    def _build_streamed_response(
+        chunks: list[ModelResponseStream],
+        messages: list[dict[str, Any]],
     ) -> ModelResponse:
+        """Group the streamed chunks, renumbering restarted tool-call indices first.
+
+        The chunk objects are mutated in place, so an ``on_token`` consumer
+        that keeps them sees the rewritten indices.
+        """
+        _normalize_tool_call_indices(chunks)
+        # Only chat completions are streamed here, so the builder's
+        # TextCompletionResponse branch is unreachable; an empty stream returns
+        # None, which the isinstance assert in the caller rejects.
         response = litellm.stream_chunk_builder(chunks, messages=messages)
         assert isinstance(response, ModelResponse), (
             f"Expected ModelResponse, got {type(response)}"
@@ -2772,7 +2783,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 for chunk in stream:
                     on_token(chunk)
                     chunks.append(chunk)
-                ret = self._combine_chat_stream(chunks, messages)
+                ret = self._build_streamed_response(chunks, messages)
 
             assert isinstance(ret, ModelResponse), (
                 f"Expected ModelResponse, got {type(ret)}"
@@ -2825,7 +2836,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                         for chunk in synced_chunks:
                             await _invoke_token_callback(on_token, chunk)
                             chunks.append(chunk)
-                    ret = self._combine_chat_stream(chunks, messages)
+                    ret = self._build_streamed_response(chunks, messages)
 
                 assert isinstance(ret, ModelResponse), (
                     f"Expected ModelResponse, got {type(ret)}"
