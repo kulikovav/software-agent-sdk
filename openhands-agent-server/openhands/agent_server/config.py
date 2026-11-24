@@ -34,8 +34,11 @@ V1_SESSION_API_KEY_ENV = "OH_SESSION_API_KEYS_0"
 ENVIRONMENT_VARIABLE_PREFIX = "OH"
 CONFIG_PATH_ENV = "OPENHANDS_AGENT_SERVER_CONFIG_PATH"
 DEFAULT_CONFIG_PATH = Path("workspace/openhands_agent_server_config.json")
-# The signing secret the memory service verifies scoped tokens with.
 MEMORY_TOKEN_SECRET_ENV = "MEMORY_TOKEN_SECRET"
+# The memory service contract a governed sandbox receives. The outer server
+# mints the token; the inner server masks it in tool output.
+MEMORY_TOKEN_ENV = "MEMORY_TOKEN"
+MEMORY_API_URL_ENV = "MEMORY_API_URL"
 # 20 minutes, matching the idle timeout used by OpenHands Cloud.
 DEFAULT_CONVERSATION_IDLE_TTL_SECONDS: Final[float] = 20 * 60.0
 ACPSkillSourcing = Literal["native", "openhands_managed"]

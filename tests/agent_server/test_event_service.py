@@ -51,6 +51,7 @@ from openhands.sdk.conversation.impl.local_conversation import (
     LocalConversation,
 )
 from openhands.sdk.conversation.message_request import SendMessageRequest
+from openhands.sdk.conversation.secret_registry import SecretRegistry
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
@@ -4110,6 +4111,35 @@ def _make_mock_conv() -> MagicMock:
     mock_conv.state = mock_state
     mock_conv._on_event = MagicMock()
     return mock_conv
+
+
+@pytest.mark.asyncio
+async def test_a_memory_token_from_the_sandbox_is_masked_in_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    token = "v1.cGF5bG9hZA.c2ln"
+    monkeypatch.setenv("MEMORY_TOKEN", token)
+    stored = _make_stored(tmp_path)
+    service = EventService(
+        stored=stored,
+        agent=_sample_agent(),
+        conversations_dir=tmp_path,
+        lease_ttl_seconds=0,
+    )
+    conversation = _make_mock_conv()
+    registry = SecretRegistry()
+    conversation._state.secret_registry = registry
+    conversation.state.secret_registry = registry
+
+    with patch(
+        "openhands.agent_server.event_service.LocalConversation",
+        return_value=conversation,
+    ):
+        await service.start()
+
+    assert registry.mask_secrets_in_output(f"echo {token}") == (
+        "echo <secret-hidden>"
+    )
 
 
 @pytest.mark.asyncio

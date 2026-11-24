@@ -25,6 +25,7 @@ from openhands.agent_server.docker_runtime.registry import (
     DockerConversationRegistry,
 )
 from openhands.agent_server.docker_runtime.routers import (
+    _ForwardPlan,
     delete_conversation,
     docker_conversation_router,
     proxy_conversation,
@@ -1216,7 +1217,15 @@ async def test_a_governed_start_verifies_the_gateway_ca(tmp_path, monkeypatch):
     monkeypatch.setattr(
         routers,
         "_prepare_forward",
-        AsyncMock(return_value=(lambda cipher: {}, None, None, False, None)),
+        AsyncMock(
+            return_value=_ForwardPlan(
+                payload=lambda cipher: {},
+                launched=None,
+                container=None,
+                worktree=False,
+                memory_scope=None,
+            )
+        ),
     )
     seen: dict[str, object] = {}
 

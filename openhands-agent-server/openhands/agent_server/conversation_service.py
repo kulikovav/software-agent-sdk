@@ -84,6 +84,7 @@ from openhands.sdk import LLM, Event, Message, TextContent
 from openhands.sdk.agent import ACPAgent
 from openhands.sdk.agent.acp_file_credentials import CODEX_AUTH_SECRET_NAME
 from openhands.sdk.agent.base import AgentBase
+from openhands.sdk.automation import AUTOMATION_TAG_KEYS
 from openhands.sdk.conversation.impl.local_conversation import LocalConversation
 from openhands.sdk.conversation.persistence_const import BASE_STATE
 from openhands.sdk.conversation.request import ConversationWorktreeOptions
@@ -130,7 +131,6 @@ if TYPE_CHECKING:
     from openhands.sdk.subagent.schema import AgentDefinition
 
 
-_AUTOMATION_TAG_KEYS = ("automationtrigger", "automationid", "automationrunid")
 # Close codes for the sockets of a conversation the server tears down. A
 # sandbox pause closes none: a reconnect would load the conversation again
 # before the sandbox freezes.
@@ -2906,7 +2906,7 @@ def _build_telemetry_context(
     """
     tags = getattr(stored, "tags", None)
     is_automation = isinstance(tags, dict) and any(
-        bool(tags.get(key)) for key in _AUTOMATION_TAG_KEYS
+        bool(tags.get(key)) for key in AUTOMATION_TAG_KEYS
     )
 
     llm = getattr(agent, "llm", None)

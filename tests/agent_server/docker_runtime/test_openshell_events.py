@@ -229,16 +229,30 @@ class TestGovernanceInjection:
     def test_governed_launch_additions_keep_the_caller_suffix(self):
         additions = AgentLaunchAdditions(system_message_suffix_append="Caller rules")
 
-        additions = governed_launch_additions(additions)
+        additions = governed_launch_additions(additions, memory_configured=True)
 
         assert additions.system_message_suffix_append is not None
         assert additions.system_message_suffix_append.startswith("Caller rules")
         assert "denied by default" in (additions.system_message_suffix_append or "")
 
     def test_governed_launch_additions_without_a_caller_suffix(self):
-        additions = governed_launch_additions(None)
+        additions = governed_launch_additions(None, memory_configured=False)
 
         assert additions.system_message_suffix_append == GOVERNANCE_CONTEXT
+
+    def test_the_memory_feature_is_advertised_only_when_it_is_configured(self):
+        without_memory = governed_launch_additions(None, memory_configured=False)
+        with_memory = governed_launch_additions(None, memory_configured=True)
+
+        assert "memory" not in (without_memory.system_message_suffix_append or "")
+        assert "memory" in (with_memory.system_message_suffix_append or "")
+
+    def test_the_memory_sentence_names_the_real_lifetime(self):
+        additions = governed_launch_additions(None, memory_configured=True)
+
+        suffix = additions.system_message_suffix_append or ""
+        assert "retention window" in suffix
+        assert "short-lived" not in suffix
 
 
 class TestPolicyLedgerDenials:

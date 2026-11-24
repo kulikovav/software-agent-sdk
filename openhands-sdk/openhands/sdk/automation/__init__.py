@@ -29,6 +29,16 @@ _AUTOMATION_REF_KEY = "automation.ref"
 _AUTOMATION_PROVIDER_KEY = "automation.provider"
 _DEFAULT_AUTOMATION_SPAN_NAME = "automation.conversation"
 
+# The conversation tags an automation launch sets; the runtime reads them back.
+AUTOMATION_TRIGGER_TAG = "automationtrigger"
+AUTOMATION_ID_TAG = "automationid"
+AUTOMATION_RUN_ID_TAG = "automationrunid"
+AUTOMATION_TAG_KEYS = (
+    AUTOMATION_TRIGGER_TAG,
+    AUTOMATION_ID_TAG,
+    AUTOMATION_RUN_ID_TAG,
+)
+
 
 class AutomationObservabilityContext(TypedDict):
     observability_metadata: NotRequired[dict[str, TraceMetadataValue]]
@@ -239,6 +249,10 @@ def automation_observability_headers(
 
 
 __all__ = [
+    "AUTOMATION_ID_TAG",
+    "AUTOMATION_RUN_ID_TAG",
+    "AUTOMATION_TAG_KEYS",
+    "AUTOMATION_TRIGGER_TAG",
     "AutomationConversationKwargs",
     "AutomationObservabilityContext",
     "automation_conversation_kwargs",

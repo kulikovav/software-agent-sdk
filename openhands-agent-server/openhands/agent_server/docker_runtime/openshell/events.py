@@ -36,8 +36,7 @@ GOVERNANCE_CONTEXT = (
     "This conversation runs inside a governed sandbox: egress is denied by "
     "default and only the model endpoint is allowed; the workspace is "
     "ephemeral; the model key resolves outside the sandbox, so only its "
-    "placeholder reaches the tools; a short-lived memory token scoped to this "
-    "conversation is available for the shared memory service. A denial appears "
+    "placeholder reaches the tools. A denial appears "
     "in a policy event; the tool outcome may show only its network symptom. "
     "Ask the operator for an approval when a task needs another destination; "
     "after an approval, exactly one retry is "
@@ -48,6 +47,20 @@ GOVERNANCE_CONTEXT = (
     "slash: for APIs with numeric identifiers, such as GitLab, use the numeric "
     "identifier instead."
 )
+
+MEMORY_CONTEXT = (
+    " A memory token scoped to this conversation is available for the shared "
+    "memory service; it stays valid for the conversation's retention window."
+)
+
+
+def governance_context(*, memory_configured: bool) -> str:
+    """The standing rules, naming only features this deployment configures."""
+    return (
+        f"{GOVERNANCE_CONTEXT}{MEMORY_CONTEXT}"
+        if memory_configured
+        else GOVERNANCE_CONTEXT
+    )
 
 # Proposals expire unanswered after this long; the next turn learns of it.
 PROPOSAL_TTL_SECONDS = 600.0
@@ -84,11 +97,6 @@ class CommitOutcome(enum.Enum):
 # The sandbox working directory; the governed registry sets it as HOME.
 NOTICES_PATH = "/sandbox/.policy/notices"
 NOTICES_DIR = "/sandbox/.policy"
-
-# The memory service contract the sandbox receives. The token is minted by the
-# outer server; the URL names the service the skill calls.
-MEMORY_TOKEN_ENV = "MEMORY_TOKEN"
-MEMORY_API_URL_ENV = "MEMORY_API_URL"
 
 _NOTICES_HOOK_COMMAND = (
     "python3 -c 'import json,os;"
@@ -131,12 +139,13 @@ def governed_hook_config(existing: HookConfig | None) -> HookConfig:
 
 def governed_launch_additions(
     additions: AgentLaunchAdditions | None,
+    *,
+    memory_configured: bool,
 ) -> AgentLaunchAdditions:
     """Append the governance context to the launch-time system suffix."""
     standing = (additions.system_message_suffix_append or "") if additions else ""
-    suffix = (
-        GOVERNANCE_CONTEXT if not standing else f"{standing}\n\n{GOVERNANCE_CONTEXT}"
-    )
+    context = governance_context(memory_configured=memory_configured)
+    suffix = context if not standing else f"{standing}\n\n{context}"
     if additions is None:
         return AgentLaunchAdditions(system_message_suffix_append=suffix)
     return additions.model_copy(update={"system_message_suffix_append": suffix})
@@ -504,7 +513,7 @@ class PolicyLedger:
         )
 
     def _expired_outcome(self, record: PolicyProposalRecord) -> ProposalOutcome:
-        """A pending request past its TTL expires as denied (R8)."""
+        """A pending request past its TTL expires as denied."""
         self.chunk_status[record.chunk_id] = "expired"
         return ProposalOutcome(
             event=PolicyEvent(

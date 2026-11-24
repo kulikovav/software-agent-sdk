@@ -63,12 +63,11 @@ async def _forward(
 ) -> tuple[dict[str, Any], Any, RuntimeIdentity]:
     registry = _registry(runtime_config, governed=False)
     body = request.model_dump(mode="json", context={"expose_secrets": True})
-    payload, launched, _, _, _ = await _prepare_forward(
-        body, registry, existing=existing, conversation_id=uuid4()
-    )
+    body["conversation_id"] = body.get("conversation_id") or str(uuid4())
+    plan = await _prepare_forward(body, registry, existing=existing)
     provisioning = RuntimeProvisioningStore(runtime_config)
     identity = provisioning.create(uuid4())
-    return payload(identity.cipher), launched, identity
+    return plan.payload(identity.cipher), plan.launched, identity
 
 
 @pytest.mark.asyncio
@@ -77,20 +76,20 @@ async def test_forward_preserves_worktree_flag(tmp_path, monkeypatch, worktree):
     runtime_config = config(tmp_path, monkeypatch)
     registry = _registry(runtime_config, governed=False)
     request = StartConversationRequest(
+        conversation_id=uuid4(),
         workspace=LocalWorkspace(working_dir="/workspace"),
         agent=Agent(llm=LLM(model="test", api_key=SecretStr("model-key"))),
         worktree=worktree,
     )
-    payload, _, _, forwarded_worktree, _ = await _prepare_forward(
+    plan = await _prepare_forward(
         request.model_dump(mode="json", context={"expose_secrets": True}),
         registry,
         existing=False,
-        conversation_id=uuid4(),
     )
     identity = RuntimeProvisioningStore(runtime_config).create(uuid4())
-    assert forwarded_worktree is worktree
-    assert payload(identity.cipher)["workspace"]["working_dir"] == "/workspace"
-    assert payload(identity.cipher)["worktree"] is worktree
+    assert plan.worktree is worktree
+    assert plan.payload(identity.cipher)["workspace"]["working_dir"] == "/workspace"
+    assert plan.payload(identity.cipher)["worktree"] is worktree
 
 
 def _no_stores() -> LaunchStores:
@@ -117,17 +116,19 @@ def _governed_registry(
 async def test_a_governed_forward_injects_the_governance_context(tmp_path, monkeypatch):
     runtime_config = config(tmp_path, monkeypatch)
     request = StartConversationRequest(
+        conversation_id=uuid4(),
         workspace=LocalWorkspace(working_dir="/workspace"),
         agent=Agent(llm=LLM(model="test", api_key=_GOVERNED_KEY)),
     )
 
-    payload, _, _, _, _ = await _prepare_forward(
+    plan = await _prepare_forward(
         request.model_dump(mode="json", context={"expose_secrets": True}),
         _governed_registry(runtime_config),
         existing=False,
-        conversation_id=uuid4(),
     )
-    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+    forwarded = plan.payload(
+        RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher
+    )
 
     assert (
         "denied by default"
@@ -141,6 +142,7 @@ async def test_a_governed_forward_injects_the_governance_context(tmp_path, monke
 async def test_a_governed_forward_merges_the_caller_injections(tmp_path, monkeypatch):
     runtime_config = config(tmp_path, monkeypatch)
     request = StartConversationRequest(
+        conversation_id=uuid4(),
         workspace=LocalWorkspace(working_dir="/workspace"),
         agent=Agent(llm=LLM(model="test", api_key=_GOVERNED_KEY)),
         agent_launch_additions=AgentLaunchAdditions(
@@ -158,13 +160,14 @@ async def test_a_governed_forward_merges_the_caller_injections(tmp_path, monkeyp
         ),
     )
 
-    payload, _, _, _, _ = await _prepare_forward(
+    plan = await _prepare_forward(
         request.model_dump(mode="json", context={"expose_secrets": True}),
         _governed_registry(runtime_config),
         existing=False,
-        conversation_id=uuid4(),
     )
-    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+    forwarded = plan.payload(
+        RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher
+    )
 
     suffix = forwarded["agent_launch_additions"]["system_message_suffix_append"]
     assert suffix.startswith("Caller rules")
@@ -181,17 +184,19 @@ async def test_a_governed_forward_merges_the_caller_injections(tmp_path, monkeyp
 async def test_an_existing_governed_start_is_not_reinjected(tmp_path, monkeypatch):
     runtime_config = config(tmp_path, monkeypatch)
     request = StartConversationRequest(
+        conversation_id=uuid4(),
         workspace=LocalWorkspace(working_dir="/workspace"),
         agent=Agent(llm=LLM(model="test", api_key=_GOVERNED_KEY)),
     )
 
-    payload, _, _, _, _ = await _prepare_forward(
+    plan = await _prepare_forward(
         request.model_dump(mode="json", context={"expose_secrets": True}),
         _governed_registry(runtime_config),
         existing=True,
-        conversation_id=uuid4(),
     )
-    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+    forwarded = plan.payload(
+        RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher
+    )
 
     assert forwarded.get("hook_config") is None
     additions = forwarded.get("agent_launch_additions") or {}
@@ -207,6 +212,7 @@ _MCP_SERVERS = {
 async def test_a_governed_start_drops_its_mcp_servers(tmp_path, monkeypatch, caplog):
     runtime_config = config(tmp_path, monkeypatch)
     request = StartConversationRequest(
+        conversation_id=uuid4(),
         workspace=LocalWorkspace(working_dir="/workspace"),
         agent=Agent(
             llm=LLM(model="test", api_key=_GOVERNED_KEY),
@@ -215,13 +221,14 @@ async def test_a_governed_start_drops_its_mcp_servers(tmp_path, monkeypatch, cap
     )
 
     with caplog.at_level(logging.WARNING):
-        payload, _, _, _, _ = await _prepare_forward(
+        plan = await _prepare_forward(
             request.model_dump(mode="json", context={"expose_secrets": True}),
             _governed_registry(runtime_config),
             existing=False,
-            conversation_id=uuid4(),
         )
-    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+    forwarded = plan.payload(
+        RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher
+    )
 
     assert forwarded["agent"]["mcp_config"] == {}
     assert "drops MCP servers" in caplog.text
@@ -238,6 +245,7 @@ async def test_a_governed_settings_start_drops_its_mcp_servers(
         mcp_config=_MCP_SERVERS,
     )
     request = StartConversationRequest(
+        conversation_id=uuid4(),
         workspace=LocalWorkspace(working_dir="/workspace"),
         agent_settings=settings.model_dump(
             mode="json", context={"expose_secrets": True}
@@ -245,17 +253,18 @@ async def test_a_governed_settings_start_drops_its_mcp_servers(
     )
 
     with caplog.at_level(logging.WARNING):
-        payload, launched, _, _, _ = await _prepare_forward(
+        plan = await _prepare_forward(
             request.model_dump(mode="json", context={"expose_secrets": True}),
             _governed_registry(runtime_config),
             existing=False,
-            conversation_id=uuid4(),
         )
-    forwarded = payload(RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher)
+    forwarded = plan.payload(
+        RuntimeProvisioningStore(runtime_config).create(uuid4()).cipher
+    )
 
     assert forwarded["agent_settings"]["mcp_config"] == {}
     assert "srv" in caplog.text
-    assert launched is None
+    assert plan.launched is None
 
 
 @pytest.mark.asyncio
@@ -351,6 +360,7 @@ async def test_every_encrypted_field_reaches_the_container_decryptable(
         },
     )
     request = StartConversationRequest(
+        conversation_id=uuid4(),
         workspace=LocalWorkspace(working_dir="/workspace"),
         agent=Agent(llm=LLM(model="test", api_key=SecretStr("model-key"))),
         agent_definitions=[helper],
@@ -359,12 +369,10 @@ async def test_every_encrypted_field_reaches_the_container_decryptable(
     body = request.model_dump(mode="json", context={"cipher": runtime_config.cipher})
     registry = _registry(runtime_config, governed=False)
 
-    payload, _, _, _, _ = await _prepare_forward(
-        body, registry, existing=False, conversation_id=uuid4()
-    )
+    plan = await _prepare_forward(body, registry, existing=False)
     identity = RuntimeProvisioningStore(runtime_config).create(uuid4())
     received = StartConversationRequest.model_validate(
-        payload(identity.cipher), context={"cipher": identity.cipher}
+        plan.payload(identity.cipher), context={"cipher": identity.cipher}
     )
 
     servers = received.agent_definitions[0].mcp_config

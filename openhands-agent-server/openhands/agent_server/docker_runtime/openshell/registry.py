@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,14 +14,17 @@ import grpc
 from fastapi import APIRouter
 from openshell._proto import openshell_pb2 as pb, sandbox_pb2
 
-from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
+from openhands.agent_server.config import (
+    MEMORY_API_URL_ENV,
+    MEMORY_TOKEN_ENV,
+    V1_SESSION_API_KEY_ENV,
+    Config,
+)
 from openhands.agent_server.docker_runtime.openshell.client import (
     OpenShellGateway,
     load_sandbox_policy,
 )
 from openhands.agent_server.docker_runtime.openshell.events import (
-    MEMORY_API_URL_ENV,
-    MEMORY_TOKEN_ENV,
     PolicyEventWatcher,
 )
 from openhands.agent_server.docker_runtime.provisioning import (
@@ -46,6 +50,11 @@ _SANDBOX_HOME = "/sandbox"
 _SANDBOX_CONVERSATIONS = f"{_SANDBOX_HOME}/conversations"
 _SANDBOX_PERSISTENCE = f"{_SANDBOX_HOME}/.openhands"
 _AGENT_PORT = 8000
+# A non-running sandbox that a start restarts; the environment is refreshed
+# before it does.
+_RESUMABLE_PHASES = frozenset(
+    {pb.SANDBOX_PHASE_STOPPED, pb.SANDBOX_PHASE_SUSPENDED}
+)
 # The agent-server image also ships a frozen ``openhands-agent-server`` binary
 # built from the upstream SDK release. That binary embeds its own copy of the
 # server, so it never sees an ``openhands-agent-server`` package installed
@@ -266,7 +275,7 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             )
             created = True
         elif sandbox.phase != pb.SANDBOX_PHASE_READY:
-            if sandbox.phase == pb.SANDBOX_PHASE_STOPPED:
+            if sandbox.phase in _RESUMABLE_PHASES:
                 self._refresh_environment(name, identity)
             sandbox = self.gateway.start(name)
         try:
@@ -339,7 +348,6 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
         return environment
 
     def _memory_token(self, identity: RuntimeIdentity) -> str | None:
-        """A token for this conversation's scope, or none when unconfigured."""
         secret = self.config.memory_token_secret
         scope: MemoryScope | None = identity.memory_scope
         if secret is None or scope is None:
@@ -349,7 +357,6 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
         )
 
     def _memory_token_ttl_seconds(self) -> int:
-        """The configured lifetime, extended to cover the retention window."""
         retention_days = self.config.conversation_storage_retention_days
         if retention_days is None:
             return self.config.memory_token_ttl_seconds
@@ -358,17 +365,30 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
         )
 
     def _refresh_environment(self, name: str, identity: RuntimeIdentity) -> None:
-        """Re-deliver the environment before a stopped sandbox restarts.
+        """Re-deliver the environment before a resumable sandbox restarts.
 
         A stopped sandbox restarts with the environment it was created with, so
         a re-minted memory token must reach it through the gateway's
         storage-preserving update. A failed refresh degrades memory; it must
         not block the resume.
         """
-        if identity.memory_scope is None:
-            return
+        environment = self._sandbox_environment(identity)
+        # ponytail: SandboxMapUpdate merge-vs-replace is unverified (the pinned
+        # package ships no proto docs), so an omitted key may keep the
+        # create-time value. An empty token is useless to a client that treats
+        # empty as unconfigured. Upgrade path: settle the semantics with a live
+        # gateway read-back.
+        environment.setdefault(MEMORY_TOKEN_ENV, "")
+        request_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{name}:{json.dumps(environment, sort_keys=True)}",
+            )
+        )
         try:
-            self.gateway.update_environment(name, self._sandbox_environment(identity))
+            self.gateway.update_environment(
+                name, environment, request_id=request_id
+            )
         except grpc.RpcError:
             logger.warning(
                 "Could not refresh the environment of sandbox %s", name, exc_info=True
