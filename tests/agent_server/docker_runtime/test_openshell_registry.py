@@ -51,6 +51,7 @@ class FakeGateway(OpenShellGateway):
         self.deleted = []
         self.started = []
         self.stopped = []
+        self.updated = []
         self.files = {}
         self.closed = False
 
@@ -73,6 +74,9 @@ class FakeGateway(OpenShellGateway):
     def start(self, name):
         self.started.append(name)
         return make_sandbox(name)
+
+    def update_environment(self, name, environment, *, request_id):
+        self.updated.append((name, dict(environment)))
 
     def stop(self, name):
         self.stopped.append(name)

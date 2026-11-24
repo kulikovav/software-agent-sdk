@@ -198,3 +198,36 @@ def test_create_adopts_a_sandbox_another_process_created(monkeypatch):
 class _AlreadyExists(grpc.RpcError):
     def code(self):
         return grpc.StatusCode.ALREADY_EXISTS
+
+
+def test_update_environment_sends_the_map_and_an_idempotency_key(monkeypatch):
+    requests = []
+
+    class RecordingStub:
+        def __init__(self, _channel):
+            pass
+
+        def UpdateSandbox(self, request, timeout):
+            requests.append((request, timeout))
+
+    monkeypatch.setattr(
+        client_module.openshell_pb2_grpc, "SandboxUpdatesStub", RecordingStub
+    )
+    gateway = OpenShellGateway.__new__(OpenShellGateway)
+    gateway.workspace = "default"
+
+    class FakeSdk:
+        _channel = object()
+
+    gateway._client = FakeSdk()
+
+    gateway.update_environment(
+        "demo", {"MEMORY_TOKEN": ""}, request_id="refresh-1"
+    )
+
+    request, timeout = requests[0]
+    assert request.workspace_scope.workspace == "default"
+    assert request.name == "demo"
+    assert dict(request.environment.values) == {"MEMORY_TOKEN": ""}
+    assert request.request_id == "refresh-1"
+    assert timeout > 0

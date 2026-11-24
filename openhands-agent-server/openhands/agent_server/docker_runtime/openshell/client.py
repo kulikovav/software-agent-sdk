@@ -29,8 +29,8 @@ from openhands.sdk.logger import get_logger
 
 logger = get_logger(__name__)
 
-# The 0.1.7 SDK pins no wrapper for the policy and log surfaces, so the
-# governance loop calls the pinned gRPC stub directly.
+# The pinned SDK wraps no policy, log, or sandbox-update call, so those use
+# its generated gRPC stubs.
 _LOG_LINES = 500
 _POLICY_TIMEOUT_SECONDS = 30.0
 _SANDBOX_UPDATE_TIMEOUT_SECONDS = 30.0
@@ -223,11 +223,19 @@ class OpenShellGateway:
     def start(self, name: str) -> SandboxRef:
         return self._client.start(name, workspace=self.workspace)
 
-    def update_environment(self, name: str, environment: Mapping[str, str]) -> None:
-        """Replace a stopped sandbox's environment while keeping its storage.
+    def update_environment(
+        self,
+        name: str,
+        environment: Mapping[str, str],
+        *,
+        request_id: str,
+    ) -> None:
+        """Replace a stopped or suspended sandbox's environment, keeping storage.
 
         The pinned SDK has no wrapper for the sandbox-updates service, so this
-        calls its generated stub on the same gateway channel.
+        calls its generated stub on the same gateway channel. A repeated
+        delivery of the same environment carries the same ``request_id``, so
+        the gateway treats it as one update.
         """
         stub = openshell_pb2_grpc.SandboxUpdatesStub(self._client._channel)
         stub.UpdateSandbox(
@@ -237,6 +245,7 @@ class OpenShellGateway:
                 ),
                 name=name,
                 environment=pb.SandboxMapUpdate(values=dict(environment)),
+                request_id=request_id,
             ),
             timeout=_SANDBOX_UPDATE_TIMEOUT_SECONDS,
         )

@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import os
 import threading
 import time
 import traceback
@@ -16,6 +17,7 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 
 from openhands.agent_server.bash_service import BashEventService
+from openhands.agent_server.config import MEMORY_TOKEN_ENV
 from openhands.agent_server.conversation_lease import (
     DEFAULT_LEASE_TTL_SECONDS,
     ConversationLease,
@@ -133,6 +135,13 @@ logger = get_logger(__name__)
 
 _T = TypeVar("_T")
 _GIT_INIT_LOCK = threading.Lock()
+
+
+def _track_memory_token(state: ConversationState) -> None:
+    """Mask the sandbox-delivered memory token in tool output and transcripts."""
+    token = os.environ.get(MEMORY_TOKEN_ENV)
+    if token:
+        state.secret_registry.track_exported_values({MEMORY_TOKEN_ENV: token})
 
 
 def _without_skill_bodies(
@@ -1583,6 +1592,7 @@ class EventService:
             mcp_startup_budget=MCP_STARTUP_BUDGET_SECONDS,
         )
 
+        _track_memory_token(conversation._state)
         conversation.set_confirmation_policy(self.stored.confirmation_policy)
         conversation.set_security_analyzer(self.stored.security_analyzer)
         # On resume the agent was unknown at construction time (loaded from

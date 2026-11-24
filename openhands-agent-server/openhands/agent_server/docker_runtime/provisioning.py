@@ -22,17 +22,18 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from openhands.agent_server.config import Config
 from openhands.agent_server.persistence.store import _get_persistence_dir
+from openhands.sdk.automation import AUTOMATION_ID_TAG, AUTOMATION_RUN_ID_TAG
 from openhands.sdk.conversation.request import ConversationContainerOptions
 from openhands.sdk.profiles.agent_profile import LaunchedAgentProfile
 from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.utils.pydantic_secrets import SecretField, cipher_context
 
 
-# The memory service verifies this wire format with the same secret.
 _MEMORY_TOKEN_VERSION = "v1"
 _MEMORY_NAMESPACE_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,127}$"
 _MEMORY_CLAIM_MAX_LENGTH = 200
 _MEMORY_NAMESPACE_MAX_LENGTH = 128
+_MEMORY_NAMESPACE_HASH_LENGTH = 8
 _INVALID_NAMESPACE_CHARS = re.compile(r"[^a-z0-9._-]+")
 
 
@@ -48,14 +49,18 @@ def _claim_value(value: str | None) -> str | None:
     return claim
 
 
-def _namespace_for(automation_id: str, conversation_id: UUID) -> str:
-    """A namespace bound to one automation, or to one conversation without one."""
-    if automation_id == conversation_id.hex:
-        return f"conversation-{conversation_id.hex}"
+def _namespace_for(automation_id: str) -> str:
+    """A namespace bound to one automation id.
+
+    The slug is lossy for readability only; the hash of the raw id keeps
+    distinct ids apart, and the same id yields the same namespace on every
+    run so two runs of one automation share memory.
+    """
     slug = _INVALID_NAMESPACE_CHARS.sub("-", automation_id.lower()).strip("._-")
-    if 0 < len(slug) <= _MEMORY_NAMESPACE_MAX_LENGTH and slug[0].isalnum():
-        return slug
-    return f"conversation-{conversation_id.hex}"
+    room = _MEMORY_NAMESPACE_MAX_LENGTH - _MEMORY_NAMESPACE_HASH_LENGTH - 1
+    slug = slug[:room].strip("._-") or "automation"
+    digest = hashlib.sha256(automation_id.encode("utf-8")).hexdigest()
+    return f"{slug}-{digest[:_MEMORY_NAMESPACE_HASH_LENGTH]}"
 
 
 class MemoryScope(BaseModel):
@@ -73,19 +78,18 @@ class MemoryScope(BaseModel):
     ) -> MemoryScope:
         """Derive the scope from the automation tags a launch carries."""
         values = tags or {}
-        automation_id = (
-            _claim_value(values.get("automationid")) or conversation_id.hex
+        automation = _claim_value(values.get(AUTOMATION_ID_TAG))
+        automation_id = automation or conversation_id.hex
+        run_id = _claim_value(values.get(AUTOMATION_RUN_ID_TAG)) or conversation_id.hex
+        namespace = (
+            _namespace_for(automation)
+            if automation
+            else f"conversation-{conversation_id.hex}"
         )
-        run_id = _claim_value(values.get("automationrunid")) or conversation_id.hex
-        return cls(
-            namespace=_namespace_for(automation_id, conversation_id),
-            automation_id=automation_id,
-            run_id=run_id,
-        )
+        return cls(namespace=namespace, automation_id=automation_id, run_id=run_id)
 
 
 def mint_memory_token(secret: str, scope: MemoryScope, ttl_seconds: int) -> str:
-    """Sign one short-lived token for a conversation's memory scope."""
     claims = {
         "namespace": scope.namespace,
         "automation_id": scope.automation_id,

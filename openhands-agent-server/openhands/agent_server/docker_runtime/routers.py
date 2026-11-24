@@ -7,7 +7,7 @@ import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 from uuid import UUID, uuid4
 
 import httpx
@@ -381,34 +381,34 @@ async def start_docker_conversation(
         raise Unprocessable(str(exc)) from exc
     release = None
     try:
-        payload, launched, options, worktree, memory_scope = await _prepare_forward(
-            body, registry, existing=existing, conversation_id=conversation_id
-        )
+        plan = await _prepare_forward(body, registry, existing=existing)
         identity = await run_store(
             registry.provisioning.create, conversation_id, host_workspace
         )
         updates: dict[str, Any] = {}
-        if memory_scope is not None and (
+        if plan.memory_scope is not None and (
             not existing or identity.memory_scope is None
         ):
-            updates["memory_scope"] = memory_scope
-        if worktree:
+            # A persisted scope is never overwritten, so two runs of one
+            # automation always share a namespace.
+            updates["memory_scope"] = plan.memory_scope
+        if plan.worktree:
             updates.update(
                 await asyncio.to_thread(_worktree_git_paths, identity.workspace_path)
             )
-        if launched is not None and identity.launched_agent_profile is None:
-            updates["launched_agent_profile"] = launched
+        if plan.launched is not None and identity.launched_agent_profile is None:
+            updates["launched_agent_profile"] = plan.launched
         # Fixed once the container accepted the conversation; until then a
         # retried start may change them.
-        if not existing and identity.container != options:
-            updates["container"] = options
+        if not existing and identity.container != plan.container:
+            updates["container"] = plan.container
         if updates:
             identity = identity.model_copy(update=updates)
             await run_store(registry.provisioning.save, identity)
         container = await registry.get_or_create(conversation_id)
         release = registry.acquire_lease(conversation_id)
-        forwarded = await asyncio.to_thread(payload, identity.cipher)
-        if worktree and identity.worktree_repository_path is not None:
+        forwarded = await asyncio.to_thread(plan.payload, identity.cipher)
+        if plan.worktree and identity.worktree_repository_path is not None:
             forwarded["workspace"] = LocalWorkspace(
                 working_dir=identity.workspace_path
             ).model_dump(mode="json")
@@ -454,19 +454,22 @@ async def start_docker_conversation(
     return response.status_code, content, conversation_id
 
 
+class _ForwardPlan(NamedTuple):
+    """What the router needs after resolving a start request."""
+
+    payload: Callable[[Cipher], dict[str, Any]]
+    launched: LaunchedAgentProfile | None
+    container: ConversationContainerOptions | None
+    worktree: bool
+    memory_scope: MemoryScope | None
+
+
 async def _prepare_forward(
     body: dict[str, Any],
     registry: DockerConversationRegistry,
     *,
     existing: bool,
-    conversation_id: UUID,
-) -> tuple[
-    Callable[[Cipher], dict[str, Any]],
-    LaunchedAgentProfile | None,
-    ConversationContainerOptions | None,
-    bool,
-    MemoryScope | None,
-]:
+) -> _ForwardPlan:
     """Resolve the start request with this host's stores; the container finalizes.
 
     The profile of a conversation that already exists is not resolved again:
@@ -515,7 +518,11 @@ async def _prepare_forward(
             update={
                 "hook_config": governed_hook_config(start.hook_config),
                 "agent_launch_additions": governed_launch_additions(
-                    start.agent_launch_additions
+                    start.agent_launch_additions,
+                    memory_configured=bool(
+                        registry.config.memory_token_secret
+                        and registry.config.memory_api_url
+                    ),
                 ),
             }
         )
@@ -525,13 +532,22 @@ async def _prepare_forward(
             start, source, secrets, cipher, load_memory=load_memory
         )
 
+    conversation_id = start.conversation_id
+    if conversation_id is None:
+        raise Unprocessable("A conversation id is required")
     launched = source.profile if isinstance(source, ResolvedLaunch) else None
     memory_scope = (
         MemoryScope.from_tags(conversation_id, start.tags)
         if registry.governed
         else None
     )
-    return payload, launched, start.container, start.worktree, memory_scope
+    return _ForwardPlan(
+        payload=payload,
+        launched=launched,
+        container=start.container,
+        worktree=start.worktree,
+        memory_scope=memory_scope,
+    )
 
 
 @docker_conversation_router.get(
