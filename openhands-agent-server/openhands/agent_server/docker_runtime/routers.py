@@ -250,7 +250,7 @@ def _refuse_model_key(
 
 
 def _strip_governed_mcp(source: LaunchSource) -> tuple[LaunchSource, list[str]]:
-    """Drop every MCP server a governed start would forward (R14).
+    """Drop every MCP server a governed start would forward.
 
     Works on both launch sources: resolved agent settings (from a stored
     profile or request ``agent_settings``) and a request-supplied agent. The
@@ -505,7 +505,7 @@ async def _prepare_forward(
         if source is not None:
             source, dropped_mcp = _strip_governed_mcp(source)
             if dropped_mcp:
-                # R14: the operator should know what governance dropped.
+                # The operator should know what governance dropped.
                 logger.warning(
                     "Governed conversation drops MCP servers: %s",
                     ", ".join(dropped_mcp),

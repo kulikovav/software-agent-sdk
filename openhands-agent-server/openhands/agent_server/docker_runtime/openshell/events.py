@@ -56,7 +56,7 @@ MEMORY_CONTEXT = (
     " A memory token scoped to this conversation is available for the shared "
     "memory service; it stays valid for the conversation's retention window. "
     "The network store is the canonical memory in this mode: recalled entries "
-    "arrive once at session start in a <MEMORY_CONTEXT> block, and durable "
+    f"arrive once at session start in a {MEMORY_CONTEXT_OPEN} block, and durable "
     "outcomes belong there, not in MEMORY.md or AGENTS.md."
 )
 
@@ -105,10 +105,12 @@ class CommitOutcome(enum.Enum):
 # The sandbox working directory; the governed registry sets it as HOME.
 NOTICES_PATH = "/sandbox/.policy/notices"
 NOTICES_DIR = "/sandbox/.policy"
-# The delivered memory block, and the one-shot guard: its presence means this
-# conversation already had its recall, so later turns neither fetch nor inject.
+# The one-shot claim marker: created atomically before the fetch, so a second
+# invocation for the same conversation recalls nothing. Its presence means the
+# attempt is spent, whether or not delivery succeeded; it holds no block.
 MEMORY_CONTEXT_PATH = "/sandbox/.policy/memory-context"
 # A cold memory host must not hold up the first turn; the hook tries once.
+# 3 s per request, total bounded by the hook's 10 s cap.
 MEMORY_FETCH_TIMEOUT_SECONDS = 3.0
 
 _NOTICES_HOOK_COMMAND = (
@@ -120,12 +122,8 @@ _NOTICES_HOOK_COMMAND = (
 )
 
 
-def governance_hook_config() -> dict[str, Any]:
-    """The hook config that carries denial notices into the next turn.
-
-    The command hook reads the notices file the watcher writes and clears it,
-    so each notice is delivered once, as context on the user's next turn.
-    """
+def _command_hook_config(name: str, command: str) -> dict[str, Any]:
+    """One user-prompt-submit command hook in its standard envelope."""
     return {
         "user_prompt_submit": [
             {
@@ -133,8 +131,8 @@ def governance_hook_config() -> dict[str, Any]:
                 "hooks": [
                     {
                         "type": "command",
-                        "name": "governance-notices",
-                        "command": _NOTICES_HOOK_COMMAND,
+                        "name": name,
+                        "command": command,
                         "timeout": 10,
                     }
                 ],
@@ -143,32 +141,51 @@ def governance_hook_config() -> dict[str, Any]:
     }
 
 
+def governance_hook_config() -> dict[str, Any]:
+    """The hook config that carries denial notices into the next turn.
+
+    The command hook reads the notices file the watcher writes and clears it,
+    so each notice is delivered once, as context on the user's next turn.
+    """
+    return _command_hook_config("governance-notices", _NOTICES_HOOK_COMMAND)
+
+
+# ponytail: the claim is taken before the fetch, so a crash between the claim
+# and the print loses that conversation's one recall but can never inject twice.
+# The claim sits in the agent's own sandbox tree, so an agent can suppress or
+# repeat its own recall; no other namespace reaches it. Upgrade path: a
+# delivery-receipt file, or a hook-runtime one-shot primitive.
 def _memory_hook_command() -> str:
     """The command hook that recalls shared memory on the first turn.
 
     It reads the scoped token and the endpoint from the sandbox environment,
-    fetches the namespace's budgeted index, caches the rendered block as its
-    one-shot guard, and prints the block as turn context. Any failure logs the
-    conversation id and the error class, marks the attempt, and prints nothing:
-    memory is an aid, never a precondition for a turn.
+    claims the one-shot marker atomically, fetches the namespace's budgeted
+    index, and prints it as turn context. Any failure logs the conversation id
+    and the error class and prints nothing: memory is an aid, never a
+    precondition for a turn.
     """
     return (
         "python3 -c '\n"
         "import base64, json, os, sys, urllib.parse, urllib.request\n"
-        f'cache = "{MEMORY_CONTEXT_PATH}"\n'
+        f'marker = "{MEMORY_CONTEXT_PATH}"\n'
         'api_url = os.environ.get("MEMORY_API_URL", "").strip()\n'
         'token = os.environ.get("MEMORY_TOKEN", "").strip()\n'
-        "if not api_url or not token or os.path.isfile(cache):\n"
+        "if not api_url or not token:\n"
         "    raise SystemExit(0)\n"
         'session = os.environ.get("OPENHANDS_SESSION_ID", "")\n'
-        "def fail(kind):\n"
-        "    try:\n"
-        "        os.makedirs(os.path.dirname(cache), exist_ok=True)\n"
-        '        open(cache, "w").close()\n'
-        "    except OSError:\n"
-        "        pass\n"
+        "def claim_once():\n"
+        "    os.makedirs(os.path.dirname(marker), exist_ok=True)\n"
+        "    os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))\n"
+        "def warn(kind):\n"
         '    note = "memory unavailable (" + kind + ") for " + session\n'
         "    print(note, file=sys.stderr)\n"
+        "try:\n"
+        "    claim_once()\n"
+        "except FileExistsError:\n"
+        "    raise SystemExit(0)\n"
+        "except OSError as error:\n"
+        "    warn(type(error).__name__)\n"
+        "    raise SystemExit(0)\n"
         "try:\n"
         '    payload = token.split(".")[1]\n'
         '    raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))\n'
@@ -185,17 +202,11 @@ def _memory_hook_command() -> str:
         "    if not isinstance(block, str) or not block.strip():\n"
         '        raise ValueError("the index has no block")\n'
         "except Exception as error:\n"
-        "    fail(type(error).__name__)\n"
+        "    warn(type(error).__name__)\n"
         "    raise SystemExit(0)\n"
         f'open_tag = "{MEMORY_CONTEXT_OPEN}"\n'
         f'close_tag = "{MEMORY_CONTEXT_CLOSE}"\n'
         "text = open_tag + chr(10) + block + chr(10) + close_tag\n"
-        "try:\n"
-        "    os.makedirs(os.path.dirname(cache), exist_ok=True)\n"
-        '    with open(cache, "w") as handle:\n'
-        "        handle.write(text)\n"
-        "except OSError:\n"
-        "    pass\n"
         'print(json.dumps({"additionalContext": text}))\n'
         "'"
     )
@@ -203,27 +214,14 @@ def _memory_hook_command() -> str:
 
 def memory_hook_config() -> dict[str, Any]:
     """The hook config that injects the recalled index on the first turn."""
-    return {
-        "user_prompt_submit": [
-            {
-                "matcher": "*",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "name": "memory-context",
-                        "command": _memory_hook_command(),
-                        "timeout": 10,
-                    }
-                ],
-            }
-        ]
-    }
+    return _command_hook_config("memory-context", _memory_hook_command())
 
 
 def governed_hook_config(
     existing: HookConfig | None, *, memory_configured: bool = False
 ) -> HookConfig:
-    """Merge the governance hooks into an agent's own hook config."""
+    """Merge governance hooks, and the memory hook when configured, into an
+    agent's own hook config."""
     configs = [existing] if existing else []
     if memory_configured:
         configs.append(HookConfig.model_validate(memory_hook_config()))
