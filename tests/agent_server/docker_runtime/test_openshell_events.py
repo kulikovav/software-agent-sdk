@@ -112,6 +112,41 @@ class TestParseDenial:
     def test_parse_ignores_an_allowed_line(self):
         assert parse_denial("HTTP:POST ALLOWED POST https://example/v1/x") is None
 
+    def test_parse_ignores_the_boot_sandbox_service_routing_denial(self):
+        assert (
+            parse_denial(
+                "HTTP:GET [MED] DENIED GET http://default--oh-bb84d938ebc459ff"
+                ".openshell.localhost:17670/health "
+                "[policy:sandbox_service_routing engine:gateway] "
+                "[sandbox_id:7a62c143-f7be-4d01-8e0d-506fd79ab7a1 "
+                "sandbox_name:oh-bb84d938ebc459ff reason:sandbox not ready]"
+            )
+            is None
+        )
+
+    def test_parse_ignores_the_boot_sandbox_service_relay_denial(self):
+        assert (
+            parse_denial(
+                "NET:OPEN [LOW] DENIED 127.0.0.1:8000 "
+                "[policy:sandbox_service_relay engine:gateway] "
+                "[reason:service endpoint unreachable]"
+            )
+            is None
+        )
+
+    def test_parse_keeps_a_gateway_denial_of_another_policy(self):
+        denial = parse_denial(
+            "HTTP:POST DENIED POST https://api.example/v1/x "
+            '[policy:canvas_ingress engine:gateway rule "POST /x"]'
+        )
+
+        assert denial == PolicyDenial(
+            layer="http",
+            destination="https://api.example/v1/x",
+            reason="canvas_ingress",
+            rule="POST /x",
+        )
+
     def test_parse_request_target_encoded_slash_rejection(self):
         denial = parse_denial(
             "HTTP request-target rejected: request-target contains an encoded "

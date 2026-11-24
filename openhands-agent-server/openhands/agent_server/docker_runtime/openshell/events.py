@@ -201,6 +201,13 @@ def parse_denial(
     parsed = _scan_fields(detail)
     if fields:
         parsed.update(fields)
+    # The gateway checks its own service routing and relay while a sandbox
+    # boots; those denials are control-plane noise, not agent egress.
+    if parsed.get("engine") == "gateway" and parsed.get("policy") in (
+        "sandbox_service_routing",
+        "sandbox_service_relay",
+    ):
+        return None
     reason = parsed.get("reason") or parsed.get("policy") or "policy_denied"
     return PolicyDenial(
         layer=layer,
