@@ -85,6 +85,9 @@ class ServerInfo(BaseModel):
             # the conversation's lifecycle lock, so a client may safely re-send
             # a create whose response it never saw.
             "idempotent_conversation_create_v1",
+            # A start's repositories are cloned into its workspace before its
+            # first turn; a server without this ignores the field.
+            "conversation_repositories_v1",
             "tool_catalog_v1",
             "agent_profile_draft_materialize_v1",
             "agent_launch_pipeline_v1",

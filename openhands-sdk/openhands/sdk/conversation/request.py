@@ -55,7 +55,7 @@ from openhands.sdk.skills import Skill
 from openhands.sdk.subagent.schema import AgentDefinition
 from openhands.sdk.tool.client_tool import ClientToolSpec
 from openhands.sdk.utils.models import kind_of
-from openhands.sdk.workspace import LocalWorkspace
+from openhands.sdk.workspace import LocalWorkspace, RepoSource
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +499,16 @@ class StartConversationRequest(ConversationConfig):
     container: ConversationContainerOptions | None = Field(
         default=None,
         description="Resources for the conversation's container (Docker runtime).",
+    )
+    repositories: list[RepoSource] = Field(
+        default_factory=list,
+        description=(
+            "Repositories to clone into the conversation's workspace before "
+            "its first turn. Each is cloned with the conversation's own "
+            "secrets as provider tokens, exactly as a preset runner clones a "
+            "run's repositories. A failed clone refuses the start. Empty (the "
+            "default) clones nothing."
+        ),
     )
 
     @model_validator(mode="before")

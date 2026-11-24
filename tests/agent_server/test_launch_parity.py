@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,7 +38,7 @@ from openhands.sdk.settings.model import (
 )
 from openhands.sdk.skills import Skill
 from openhands.sdk.utils.cipher import Cipher
-from openhands.sdk.workspace import LocalWorkspace
+from openhands.sdk.workspace import LocalWorkspace, RepoSource
 from tests.agent_server.conftest import client_context
 
 
@@ -318,6 +319,26 @@ def test_the_global_critic_key_reaches_profile_launches_but_no_response(
     assert critic_key(in_container) == "sk-critic"
     assert "sk-critic" not in str(payload)
     assert "sk-critic" not in str(preview)
+
+
+def test_a_governed_start_forwards_its_repositories_to_the_container():
+    """The sandbox's agent server receives the repositories the start named.
+
+    A governed start is prepared on the outer server and forwarded; a dropped
+    field would leave the run on an empty workspace.
+    """
+    repositories = [RepoSource(url="https://github.com/acme/api", ref="main")]
+    request = StartConversationRequest(
+        agent_profile_id=uuid4(),
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        repositories=repositories,
+    )
+
+    payload = forward_to_runtime(
+        request, None, {}, Cipher("container-key"), load_memory=False
+    )
+
+    assert StartConversationRequest.model_validate(payload).repositories == repositories
 
 
 def test_inline_stored_and_agent_settings_sources_launch_the_same_agent(
