@@ -4,7 +4,7 @@ import importlib
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -87,6 +87,7 @@ from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation.impl.local_conversation import LocalConversation
 from openhands.sdk.conversation.persistence_const import BASE_STATE
 from openhands.sdk.conversation.request import ConversationWorktreeOptions
+from openhands.sdk.conversation.secret_registry import SecretRegistry
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
@@ -105,16 +106,24 @@ from openhands.sdk.event import MessageEvent
 from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 from openhands.sdk.git.exceptions import GitCommandError, GitRepositoryError
 from openhands.sdk.git.utils import run_git_command, validate_git_repository
-from openhands.sdk.launch import LaunchedAgent, LaunchStoreError, LaunchStores, finalize
+from openhands.sdk.launch import (
+    AgentLaunchError,
+    LaunchedAgent,
+    LaunchStoreError,
+    LaunchStores,
+    finalize,
+)
 from openhands.sdk.llm.call_context import LLMCallContext
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.mcp.utils import MCPToolProvider
 from openhands.sdk.observability import OPERATION_METADATA_KEY, observe
+from openhands.sdk.secret import SecretSource
 from openhands.sdk.tool.client_tool import register_client_tools
 from openhands.sdk.tool.registry import get_tool_module_qualnames, is_tool_available
 from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.utils.pydantic_secrets import cipher_context, client_context
-from openhands.sdk.workspace import LocalWorkspace
+from openhands.sdk.workspace import LocalWorkspace, RepoSource
+from openhands.sdk.workspace.repo import clone_repos
 
 
 if TYPE_CHECKING:
@@ -339,6 +348,43 @@ logger = logging.getLogger(__name__)
 
 def _same_workspace(a: LocalWorkspace, b: LocalWorkspace) -> bool:
     return Path(a.working_dir).resolve() == Path(b.working_dir).resolve()
+
+
+def _clone_conversation_repositories(
+    repositories: list[RepoSource],
+    workspace: str,
+    secrets: Mapping[str, SecretSource],
+) -> None:
+    """Clone a new conversation's repositories into its own workspace.
+
+    The same clone a preset runner performs before it starts its conversation:
+    ``clone_repos`` with the conversation's secrets as the provider-token
+    fetcher, into the conversation's working directory. A failed clone removes
+    the clones this call made, then refuses the start, so a retry starts clean
+    and no agent runs against a workspace it did not ask for.
+    """
+    target = Path(workspace)
+    existing = {entry.name for entry in target.iterdir()} if target.is_dir() else set()
+    registry = SecretRegistry(secret_sources=dict(secrets))
+    result = clone_repos(
+        repositories,
+        target,
+        token_fetcher=registry.get_secret_value,
+    )
+    if result.failed_repos:
+        # ``clone_repos`` dedups names only within one call: a directory a
+        # failed call left behind would block every retry on this conversation.
+        for entry in list(target.iterdir()) if target.is_dir() else ():
+            if entry.name in existing:
+                continue
+            if entry.is_dir():
+                safe_rmtree(entry, "partly cloned repository")
+            else:
+                entry.unlink(missing_ok=True)
+        raise AgentLaunchError(
+            "Could not clone the conversation's repositories: "
+            + ", ".join(result.failed_repos)
+        )
 
 
 def _compose_conversation_info(
@@ -1875,6 +1921,9 @@ class ConversationService:
                 "agent_profile_id",
                 "agent_launch_additions",
                 "max_budget_per_run",
+                # A start's repository clone happens once, before the record
+                # exists; it is not conversation state a restart replays.
+                "repositories",
             },
         )
         launched_agent_profile = launched.profile or runtime_launched_profile
@@ -1906,6 +1955,7 @@ class ConversationService:
             initial_sender=initial_sender,
             reuse_request=request,
             max_budget_per_run=request.max_budget_per_run,
+            clone_repositories=request.repositories,
         )
 
     async def _launch_prepared_conversation(
@@ -1919,6 +1969,7 @@ class ConversationService:
         reuse_request: StartConversationRequest | None = None,
         max_budget_per_run: float | None = None,
         gateway_run: bool = False,
+        clone_repositories: list[RepoSource] | None = None,
     ) -> tuple[ConversationInfo, bool]:
         """Persist a prepared conversation, deliver its first message and notify.
 
@@ -1944,6 +1995,16 @@ class ConversationService:
                     raise ValueError(f"Conversation with id {stored.id} already exists")
                 return await self._reuse_existing_conversation_locked(
                     stored.id, reuse_request
+                )
+            # A new conversation clones the repositories its start named into
+            # the same working directory, before its record is persisted. A
+            # failed clone refuses the start; a resume never re-clones.
+            if clone_repositories:
+                await asyncio.to_thread(
+                    _clone_conversation_repositories,
+                    clone_repositories,
+                    stored.workspace.working_dir,
+                    stored.secrets,
                 )
             # New conversation: the agent is written to base_state.json (its
             # single source of truth), not to meta.json. Pass it explicitly.

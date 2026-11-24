@@ -55,6 +55,7 @@ from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 from openhands.sdk.event.llm_convertible import MessageEvent
 from openhands.sdk.git.exceptions import GitCommandError
 from openhands.sdk.git.utils import run_git_command
+from openhands.sdk.launch import AgentLaunchError
 from openhands.sdk.llm import MessageToolCall, TextContent
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.mcp.config import dump_mcp_config
@@ -68,7 +69,8 @@ from openhands.sdk.subagent.registry import (
 )
 from openhands.sdk.subagent.schema import AgentDefinition
 from openhands.sdk.utils.cipher import Cipher
-from openhands.sdk.workspace import LocalWorkspace
+from openhands.sdk.workspace import LocalWorkspace, RepoSource
+from openhands.sdk.workspace.repo import CloneResult
 from openhands.tools.terminal.definition import TerminalAction, TerminalObservation
 
 
@@ -539,6 +541,143 @@ async def test_start_conversation_registers_and_injects_client_tools(
     from openhands.sdk.tool.registry import list_registered_tools
 
     assert "srv_show_dialog" in list_registered_tools()
+
+
+@pytest.mark.asyncio
+async def test_start_conversation_clones_its_repositories_into_the_workspace(
+    conversation_service, tmp_path
+):
+    """A start's repositories are cloned before the conversation's first turn.
+
+    This is the clone a preset runner performs before it starts its
+    conversation: ``clone_repos`` into the conversation's own working
+    directory, with the conversation's secrets as the provider-token fetcher.
+    """
+    origin = tmp_path / "origin"
+    _init_git_repo(origin)
+    workspace_dir = tmp_path / "workspace"
+
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        repositories=[RepoSource(url=f"file://{origin}")],
+    )
+
+    _, created = await conversation_service.start_conversation(request)
+
+    assert created
+    assert (workspace_dir / "origin" / "README.md").read_text() == "# test repo\n"
+
+
+@pytest.mark.asyncio
+async def test_start_conversation_refuses_a_repository_it_cannot_clone(
+    conversation_service, tmp_path
+):
+    """A failed clone refuses the start, so no agent runs on an empty workspace."""
+    workspace_dir = tmp_path / "workspace"
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        repositories=[RepoSource(url=f"file://{tmp_path / 'missing'}")],
+    )
+
+    with pytest.raises(AgentLaunchError, match="missing"):
+        await conversation_service.start_conversation(request)
+
+    assert await conversation_service.count_conversations() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_a_failed_clone_succeeds(conversation_service, tmp_path):
+    """A failed clone removes its own clones, so the retry starts clean."""
+    origin = tmp_path / "origin"
+    _init_git_repo(origin)
+    workspace_dir = tmp_path / "workspace"
+    conversation_id = uuid4()
+    agent = Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[])
+
+    def start(repositories):
+        return StartConversationRequest(
+            agent=agent,
+            workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+            confirmation_policy=NeverConfirm(),
+            conversation_id=conversation_id,
+            repositories=repositories,
+        )
+
+    with pytest.raises(AgentLaunchError, match="missing"):
+        await conversation_service.start_conversation(
+            start(
+                [
+                    RepoSource(url=f"file://{origin}"),
+                    RepoSource(url=f"file://{tmp_path / 'missing'}"),
+                ]
+            )
+        )
+
+    # The clone the failed start made is gone, not left to block the retry.
+    assert not (workspace_dir / "origin").exists()
+
+    _, created = await conversation_service.start_conversation(
+        start([RepoSource(url=f"file://{origin}")])
+    )
+
+    assert created
+    assert (workspace_dir / "origin" / "README.md").read_text() == "# test repo\n"
+
+
+@pytest.mark.asyncio
+async def test_a_start_clones_with_the_conversation_secrets(
+    conversation_service, tmp_path
+):
+    """The conversation's stored secret is the token the clone fetches."""
+    fetched: list[str | None] = []
+
+    def capture(repositories, target_dir, token_fetcher=None):  # noqa: ARG001
+        assert token_fetcher is not None
+        fetched.append(token_fetcher("github_token"))
+        return CloneResult(success_count=1, failed_repos=[])
+
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(tmp_path / "workspace")),
+        confirmation_policy=NeverConfirm(),
+        repositories=[RepoSource(url="https://github.com/acme/private")],
+        secrets={"github_token": StaticSecret(value=SecretStr("ghp_secret"))},
+    )
+
+    with patch("openhands.agent_server.conversation_service.clone_repos", capture):
+        _, created = await conversation_service.start_conversation(request)
+
+    assert created
+    assert fetched == ["ghp_secret"]
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_start_does_not_clone_again(conversation_service, tmp_path):
+    """A repeat start reuses the conversation; it never re-clones its repositories."""
+    origin = tmp_path / "origin"
+    _init_git_repo(origin)
+    workspace_dir = tmp_path / "workspace"
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        conversation_id=uuid4(),
+        repositories=[RepoSource(url=f"file://{origin}")],
+    )
+
+    _, created = await conversation_service.start_conversation(request)
+    assert created
+    clone = workspace_dir / "origin"
+    clone.rename(workspace_dir / "moved")
+
+    _, created = await conversation_service.start_conversation(request)
+
+    assert not created
+    assert not clone.exists()
 
 
 @pytest.mark.asyncio
