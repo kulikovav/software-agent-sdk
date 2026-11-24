@@ -18,10 +18,19 @@ from openhands.sdk.utils.path import get_user_persistence_dir, to_posix_path
 
 logger = get_logger(__name__)
 
-__all__ = ["MEMORY_CHAR_BUDGET", "MEMORY_INDEX_RELPATH", "load_memory"]
+__all__ = [
+    "MEMORY_CHAR_BUDGET",
+    "MEMORY_CONTEXT_CLOSE",
+    "MEMORY_CONTEXT_OPEN",
+    "MEMORY_INDEX_RELPATH",
+    "load_memory",
+    "render_memory_context",
+]
 
 MEMORY_INDEX_RELPATH: Final[str] = ".openhands/memory/MEMORY.md"
 MEMORY_CHAR_BUDGET: Final[int] = 6000
+MEMORY_CONTEXT_OPEN: Final[str] = "<MEMORY_CONTEXT>"
+MEMORY_CONTEXT_CLOSE: Final[str] = "</MEMORY_CONTEXT>"
 _TRUNCATION_NOTICE: Final[str] = "[earlier memory truncated]"
 
 
@@ -104,3 +113,16 @@ def load_memory(
         f"{header}\n{_truncate_top(body, budget)}"
         for (header, body), budget in zip(tiers, budgets)
     )
+
+
+def render_memory_context(block: str) -> str | None:
+    """Wrap a memory service's block in the outer prompt section.
+
+    The service already rendered the inner ``<UNTRUSTED_CONTENT>`` wrapper and
+    cut it to the prompt budget, so this adds only the outer section: another
+    wrapper or cut here would nest the tags or truncate the block twice.
+    Returns ``None`` for an empty block, so a caller injects nothing.
+    """
+    if not block.strip():
+        return None
+    return f"{MEMORY_CONTEXT_OPEN}\n{block}\n{MEMORY_CONTEXT_CLOSE}"

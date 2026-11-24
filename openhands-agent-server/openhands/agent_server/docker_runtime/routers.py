@@ -511,18 +511,20 @@ async def _prepare_forward(
                     ", ".join(dropped_mcp),
                 )
     if registry.governed and not existing:
+        memory_configured = bool(
+            registry.config.memory_token_secret and registry.config.memory_api_url
+        )
         # Server-side governance injection: the standing rules ride the launch
-        # additions and the notices hook rides the hook config, both already
-        # existing wire fields, so the start schema stays untouched.
+        # additions; the notices and memory hooks ride the hook config. Both
+        # are existing wire fields, so the start schema stays untouched.
         start = start.model_copy(
             update={
-                "hook_config": governed_hook_config(start.hook_config),
+                "hook_config": governed_hook_config(
+                    start.hook_config, memory_configured=memory_configured
+                ),
                 "agent_launch_additions": governed_launch_additions(
                     start.agent_launch_additions,
-                    memory_configured=bool(
-                        registry.config.memory_token_secret
-                        and registry.config.memory_api_url
-                    ),
+                    memory_configured=memory_configured,
                 ),
             }
         )
