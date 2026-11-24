@@ -27,6 +27,7 @@ from openhands.agent_server.docker_runtime.openshell.events import (
     governed_hook_config,
     governed_launch_additions,
 )
+from openhands.agent_server.docker_runtime.provisioning import MemoryScope
 from openhands.agent_server.docker_runtime.proxy import (
     bridge_websocket,
     proxy_http,
@@ -380,13 +381,17 @@ async def start_docker_conversation(
         raise Unprocessable(str(exc)) from exc
     release = None
     try:
-        payload, launched, options, worktree = await _prepare_forward(
-            body, registry, existing=existing
+        payload, launched, options, worktree, memory_scope = await _prepare_forward(
+            body, registry, existing=existing, conversation_id=conversation_id
         )
         identity = await run_store(
             registry.provisioning.create, conversation_id, host_workspace
         )
         updates: dict[str, Any] = {}
+        if memory_scope is not None and (
+            not existing or identity.memory_scope is None
+        ):
+            updates["memory_scope"] = memory_scope
         if worktree:
             updates.update(
                 await asyncio.to_thread(_worktree_git_paths, identity.workspace_path)
@@ -450,12 +455,17 @@ async def start_docker_conversation(
 
 
 async def _prepare_forward(
-    body: dict[str, Any], registry: DockerConversationRegistry, *, existing: bool
+    body: dict[str, Any],
+    registry: DockerConversationRegistry,
+    *,
+    existing: bool,
+    conversation_id: UUID,
 ) -> tuple[
     Callable[[Cipher], dict[str, Any]],
     LaunchedAgentProfile | None,
     ConversationContainerOptions | None,
     bool,
+    MemoryScope | None,
 ]:
     """Resolve the start request with this host's stores; the container finalizes.
 
@@ -516,7 +526,12 @@ async def _prepare_forward(
         )
 
     launched = source.profile if isinstance(source, ResolvedLaunch) else None
-    return payload, launched, start.container, start.worktree
+    memory_scope = (
+        MemoryScope.from_tags(conversation_id, start.tags)
+        if registry.governed
+        else None
+    )
+    return payload, launched, start.container, start.worktree, memory_scope
 
 
 @docker_conversation_router.get(

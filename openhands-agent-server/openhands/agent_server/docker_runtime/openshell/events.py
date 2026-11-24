@@ -35,10 +35,12 @@ logger = get_logger(__name__)
 GOVERNANCE_CONTEXT = (
     "This conversation runs inside a governed sandbox: egress is denied by "
     "default and only the model endpoint is allowed; the workspace is "
-    "ephemeral; credentials resolve outside the sandbox, so only placeholders "
-    "reach the tools. A denial appears in a policy event; the tool outcome may "
-    "show only its network symptom. Ask the operator for an approval when a "
-    "task needs another destination; after an approval, exactly one retry is "
+    "ephemeral; the model key resolves outside the sandbox, so only its "
+    "placeholder reaches the tools; a short-lived memory token scoped to this "
+    "conversation is available for the shared memory service. A denial appears "
+    "in a policy event; the tool outcome may show only its network symptom. "
+    "Ask the operator for an approval when a task needs another destination; "
+    "after an approval, exactly one retry is "
     "allowed on the next turn. A connection to an address in 198.18.0.0/15 "
     "that fails or hangs may be a stale policy-DNS mapping: retry with a new "
     "connection; if it still fails, ask the operator for access. A TLS EOF on "
@@ -82,6 +84,11 @@ class CommitOutcome(enum.Enum):
 # The sandbox working directory; the governed registry sets it as HOME.
 NOTICES_PATH = "/sandbox/.policy/notices"
 NOTICES_DIR = "/sandbox/.policy"
+
+# The memory service contract the sandbox receives. The token is minted by the
+# outer server; the URL names the service the skill calls.
+MEMORY_TOKEN_ENV = "MEMORY_TOKEN"
+MEMORY_API_URL_ENV = "MEMORY_API_URL"
 
 _NOTICES_HOOK_COMMAND = (
     "python3 -c 'import json,os;"
