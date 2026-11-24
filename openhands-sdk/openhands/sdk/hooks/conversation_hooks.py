@@ -297,7 +297,7 @@ class HookEventProcessor:
 
         # Inject additional_context into extended_content
         if additional_context:
-            logger.debug(f"Hook injecting context: {additional_context[:100]}...")
+            logger.debug("Hook injecting %d chars of context", len(additional_context))
             new_extended_content = list(event.extended_content) + [
                 TextContent(text=additional_context)
             ]

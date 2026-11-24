@@ -24,7 +24,6 @@ __all__ = [
     "MEMORY_CONTEXT_OPEN",
     "MEMORY_INDEX_RELPATH",
     "load_memory",
-    "render_memory_context",
 ]
 
 MEMORY_INDEX_RELPATH: Final[str] = ".openhands/memory/MEMORY.md"
@@ -113,16 +112,3 @@ def load_memory(
         f"{header}\n{_truncate_top(body, budget)}"
         for (header, body), budget in zip(tiers, budgets)
     )
-
-
-def render_memory_context(block: str) -> str | None:
-    """Wrap a memory service's block in the outer prompt section.
-
-    The service already rendered the inner ``<UNTRUSTED_CONTENT>`` wrapper and
-    cut it to the prompt budget, so this adds only the outer section: another
-    wrapper or cut here would nest the tags or truncate the block twice.
-    Returns ``None`` for an empty block, so a caller injects nothing.
-    """
-    if not block.strip():
-        return None
-    return f"{MEMORY_CONTEXT_OPEN}\n{block}\n{MEMORY_CONTEXT_CLOSE}"

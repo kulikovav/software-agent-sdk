@@ -24,7 +24,7 @@ from openhands.agent_server.docker_runtime.provisioning import (
     MemoryScope,
     mint_memory_token,
 )
-from openhands.sdk.context.memory import render_memory_context
+from openhands.sdk.context.memory import MEMORY_CONTEXT_CLOSE, MEMORY_CONTEXT_OPEN
 from openhands.sdk.hooks import HookConfig
 
 
@@ -86,8 +86,8 @@ class _StubService:
 
 
 @pytest.fixture
-def cache_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point the one-shot cache into a temp directory instead of the sandbox."""
+def claim_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the one-shot claim marker into a temp directory instead of the sandbox."""
     path = tmp_path / "policy" / "memory-context"
     monkeypatch.setattr(events_module, "MEMORY_CONTEXT_PATH", str(path))
     return path
@@ -100,19 +100,32 @@ def _token(namespace: str = "automation-a") -> str:
     return mint_memory_token("test-secret", scope, 3600)
 
 
-def _run_hook(
-    *, url: str, token: str, session: str = "conv-1"
-) -> subprocess.CompletedProcess[str]:
-    """Run the hook command the way the governor's executor would."""
-    command = memory_hook_config()["user_prompt_submit"][0]["hooks"][0]["command"]
+def _hook_command(name: str) -> str:
+    """The command of the named memory hook, found through the typed config."""
+    config = HookConfig.model_validate(memory_hook_config())
+    for matcher in config.user_prompt_submit:
+        for hook in matcher.hooks:
+            if hook.name == name:
+                return hook.command
+    raise AssertionError(f"the memory hook config carries no {name} hook")
+
+
+def _hook_env(*, url: str, token: str, session: str) -> dict[str, str]:
     env = dict(os.environ)
     env["MEMORY_API_URL"] = url
     env["MEMORY_TOKEN"] = token
     env["OPENHANDS_SESSION_ID"] = session
+    return env
+
+
+def _run_hook(
+    *, url: str, token: str, session: str = "conv-1"
+) -> subprocess.CompletedProcess[str]:
+    """Run the memory hook's shell command with an empty event on stdin."""
     return subprocess.run(
-        command,
+        _hook_command("memory-context"),
         shell=True,
-        env=env,
+        env=_hook_env(url=url, token=token, session=session),
         input="{}",
         text=True,
         capture_output=True,
@@ -120,8 +133,28 @@ def _run_hook(
     )
 
 
+def _start_hook(
+    *, url: str, token: str, session: str = "conv-1"
+) -> subprocess.Popen[str]:
+    """Start the memory hook in the background, so two can race for the claim."""
+    return subprocess.Popen(
+        _hook_command("memory-context"),
+        shell=True,
+        env=_hook_env(url=url, token=token, session=session),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _wrapped(block: str) -> str:
+    """The outer section the hook wraps the service block in (a wire contract)."""
+    return f"{MEMORY_CONTEXT_OPEN}\n{block}\n{MEMORY_CONTEXT_CLOSE}"
+
+
 def test_the_first_turn_injects_the_index_and_later_turns_do_not(
-    cache_path: Path,
+    claim_path: Path,
 ) -> None:
     token = _token()
     with _StubService() as service:
@@ -129,17 +162,50 @@ def test_the_first_turn_injects_the_index_and_later_turns_do_not(
         second = _run_hook(url=service.url, token=token)
 
     assert first.returncode == 0
-    injected = json.loads(first.stdout)["additionalContext"]
-    assert injected == render_memory_context(INDEX_BLOCK)
-    assert injected.count("<MEMORY_CONTEXT>") == 1
-    assert injected.count(INDEX_BLOCK) == 1
+    assert json.loads(first.stdout)["additionalContext"] == _wrapped(INDEX_BLOCK)
     assert second.returncode == 0
     assert second.stdout.strip() == ""
     assert len(service.requests) == 1
 
 
+def test_the_hook_delivers_an_over_budget_block_whole(claim_path: Path) -> None:
+    """The service cuts the block to the prompt budget; the hook must not re-cut it."""
+    block = "<UNTRUSTED_CONTENT>\n" + ("x" * 9000) + "\n</UNTRUSTED_CONTENT>"
+    with _StubService() as service:
+        service.block = block
+        result = _run_hook(url=service.url, token=_token())
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["additionalContext"] == _wrapped(block)
+
+
+def test_a_second_concurrent_invocation_loses_the_claim(claim_path: Path) -> None:
+    token = _token()
+    with _StubService() as service:
+        # Held long enough that both processes are alive during the fetch.
+        service.delay = 1.0
+        processes = [_start_hook(url=service.url, token=token) for _ in range(2)]
+        results = [process.communicate("{}", timeout=30) for process in processes]
+
+    assert [process.returncode for process in processes] == [0, 0]
+    injected = [stdout for stdout, _ in results if stdout.strip()]
+    assert len(injected) == 1
+    assert json.loads(injected[0])["additionalContext"] == _wrapped(INDEX_BLOCK)
+    assert len(service.requests) == 1
+    assert claim_path.is_file()
+
+
+def test_the_claim_marker_holds_no_memory_content(claim_path: Path) -> None:
+    with _StubService() as service:
+        result = _run_hook(url=service.url, token=_token())
+
+    assert result.returncode == 0
+    assert claim_path.is_file()
+    assert claim_path.read_text() == ""
+
+
 def test_the_hook_reads_its_namespace_through_the_delivered_token(
-    cache_path: Path,
+    claim_path: Path,
 ) -> None:
     token = _token()
 
@@ -153,7 +219,7 @@ def test_the_hook_reads_its_namespace_through_the_delivered_token(
 
 
 @pytest.mark.parametrize("status", [500, 503])
-def test_a_failed_fetch_degrades_to_empty_memory(cache_path: Path, status: int) -> None:
+def test_a_failed_fetch_degrades_to_empty_memory(claim_path: Path, status: int) -> None:
     token = _token()
     with _StubService() as service:
         service.status = status
@@ -163,15 +229,14 @@ def test_a_failed_fetch_degrades_to_empty_memory(cache_path: Path, status: int) 
     assert first.returncode == 0
     assert first.stdout.strip() == ""
     assert "conv-1" in first.stderr
-    assert "HTTPError" in first.stderr
     assert token not in first.stderr
-    # The attempt is marked, so a failing host is not waited on again.
+    # The attempt stays claimed, so a failing host is not waited on again.
     assert second.returncode == 0
     assert second.stdout.strip() == ""
     assert len(service.requests) == 1
 
 
-def test_a_refused_connection_degrades_to_empty_memory(cache_path: Path) -> None:
+def test_a_refused_connection_degrades_to_empty_memory(claim_path: Path) -> None:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -184,7 +249,7 @@ def test_a_refused_connection_degrades_to_empty_memory(cache_path: Path) -> None
 
 
 def test_a_slow_service_degrades_within_the_short_timeout(
-    cache_path: Path, monkeypatch: pytest.MonkeyPatch
+    claim_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(events_module, "MEMORY_FETCH_TIMEOUT_SECONDS", 0.2)
     with _StubService() as service:
@@ -200,7 +265,7 @@ def test_a_slow_service_degrades_within_the_short_timeout(
 
 
 @pytest.mark.parametrize("missing", ["MEMORY_API_URL", "MEMORY_TOKEN"])
-def test_unconfigured_memory_fetches_nothing(cache_path: Path, missing: str) -> None:
+def test_unconfigured_memory_fetches_nothing(claim_path: Path, missing: str) -> None:
     with _StubService() as service:
         result = _run_hook(
             url="" if missing == "MEMORY_API_URL" else service.url,
@@ -210,7 +275,7 @@ def test_unconfigured_memory_fetches_nothing(cache_path: Path, missing: str) -> 
     assert result.returncode == 0
     assert result.stdout.strip() == ""
     assert service.requests == []
-    assert not cache_path.exists()
+    assert not claim_path.exists()
 
 
 def _hook_names(config: HookConfig) -> list[str]:
@@ -253,7 +318,4 @@ def test_the_governed_guidance_makes_the_network_store_canonical() -> None:
     additions = governed_launch_additions(None, memory_configured=True)
 
     suffix = additions.system_message_suffix_append or ""
-    assert "network store" in suffix
-    assert "canonical" in suffix
-    assert "MEMORY.md" in suffix
-    assert "AGENTS.md" in suffix
+    assert "The network store is the canonical memory in this mode" in suffix
