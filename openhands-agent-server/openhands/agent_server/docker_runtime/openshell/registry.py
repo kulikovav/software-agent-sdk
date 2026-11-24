@@ -50,8 +50,6 @@ _SANDBOX_HOME = "/sandbox"
 _SANDBOX_CONVERSATIONS = f"{_SANDBOX_HOME}/conversations"
 _SANDBOX_PERSISTENCE = f"{_SANDBOX_HOME}/.openhands"
 _AGENT_PORT = 8000
-# A non-running sandbox that a start restarts; the environment is refreshed
-# before it does.
 _RESUMABLE_PHASES = frozenset(
     {pb.SANDBOX_PHASE_STOPPED, pb.SANDBOX_PHASE_SUSPENDED}
 )
@@ -367,8 +365,8 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
     def _refresh_environment(self, name: str, identity: RuntimeIdentity) -> None:
         """Re-deliver the environment before a resumable sandbox restarts.
 
-        A stopped sandbox restarts with the environment it was created with, so
-        a re-minted memory token must reach it through the gateway's
+        A resumable sandbox restarts with the environment it was created with,
+        so a re-minted memory token must reach it through the gateway's
         storage-preserving update. A failed refresh degrades memory; it must
         not block the resume.
         """

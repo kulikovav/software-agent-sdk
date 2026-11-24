@@ -178,7 +178,7 @@ def test_one_automation_keeps_one_namespace_across_conversations():
     first = MemoryScope.from_tags(uuid4(), {"automationid": "auto-1"})
     second = MemoryScope.from_tags(uuid4(), {"automationid": "auto-1"})
 
-    assert first.namespace == second.namespace == "auto-1-4161fa29"
+    assert first.namespace == second.namespace == "auto-1-4161fa29aaff5be6"
 
 
 @pytest.mark.parametrize(
@@ -237,7 +237,7 @@ def test_a_launched_sandbox_holds_one_token_for_its_scope(tmp_path, monkeypatch)
     tokens = [value for value in environment.values() if value.startswith("v1.")]
     assert len(tokens) == 1
     claims = claims_of(tokens[0])
-    assert claims["namespace"] == "auto-1-4161fa29"
+    assert claims["namespace"] == "auto-1-4161fa29aaff5be6"
     assert claims["automation_id"] == "auto-1"
     assert claims["run_id"] == "run-1"
     assert environment[MEMORY_API_URL_ENV] == MEMORY_API_URL
@@ -416,7 +416,7 @@ async def test_a_launch_derives_the_scope_from_automation_tags(tmp_path):
 
     scope = plan.memory_scope
     assert scope is not None
-    assert scope.namespace == "auto-1-4161fa29"
+    assert scope.namespace == "auto-1-4161fa29aaff5be6"
     assert scope.automation_id == "auto-1"
     assert scope.run_id == "run-1"
 
@@ -476,7 +476,7 @@ async def test_the_first_launch_scope_is_persisted_and_kept(tmp_path, monkeypatc
     second = registry.provisioning.load(conversation_id).memory_scope
 
     assert first is not None
-    assert first.namespace == "auto-1-4161fa29"
+    assert first.namespace == "auto-1-4161fa29aaff5be6"
     assert second == first
 
 
@@ -525,6 +525,6 @@ def test_the_delivered_token_authenticates_to_the_memory_service(tmp_path, monke
         sys.path.remove(source)
     claims = verify_token(MEMORY_TOKEN_SECRET, environment[MEMORY_TOKEN_ENV])
     assert claims is not None
-    assert claims.namespace == "auto-1-4161fa29"
+    assert claims.namespace == "auto-1-4161fa29aaff5be6"
     assert claims.automation_id == "auto-1"
     assert claims.run_id == "run-1"
