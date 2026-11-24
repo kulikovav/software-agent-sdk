@@ -23,6 +23,10 @@ from uuid import UUID
 import grpc
 
 from openhands.agent_server.docker_runtime.registry import ConversationContainer
+from openhands.sdk.context.memory import (
+    MEMORY_CONTEXT_CLOSE,
+    MEMORY_CONTEXT_OPEN,
+)
 from openhands.sdk.conversation.request import AgentLaunchAdditions
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import PolicyEvent
@@ -50,7 +54,10 @@ GOVERNANCE_CONTEXT = (
 
 MEMORY_CONTEXT = (
     " A memory token scoped to this conversation is available for the shared "
-    "memory service; it stays valid for the conversation's retention window."
+    "memory service; it stays valid for the conversation's retention window. "
+    "The network store is the canonical memory in this mode: recalled entries "
+    "arrive once at session start in a <MEMORY_CONTEXT> block, and durable "
+    "outcomes belong there, not in MEMORY.md or AGENTS.md."
 )
 
 
@@ -61,6 +68,7 @@ def governance_context(*, memory_configured: bool) -> str:
         if memory_configured
         else GOVERNANCE_CONTEXT
     )
+
 
 # Proposals expire unanswered after this long; the next turn learns of it.
 PROPOSAL_TTL_SECONDS = 600.0
@@ -97,6 +105,11 @@ class CommitOutcome(enum.Enum):
 # The sandbox working directory; the governed registry sets it as HOME.
 NOTICES_PATH = "/sandbox/.policy/notices"
 NOTICES_DIR = "/sandbox/.policy"
+# The delivered memory block, and the one-shot guard: its presence means this
+# conversation already had its recall, so later turns neither fetch nor inject.
+MEMORY_CONTEXT_PATH = "/sandbox/.policy/memory-context"
+# A cold memory host must not hold up the first turn; the hook tries once.
+MEMORY_FETCH_TIMEOUT_SECONDS = 3.0
 
 _NOTICES_HOOK_COMMAND = (
     "python3 -c 'import json,os;"
@@ -130,11 +143,93 @@ def governance_hook_config() -> dict[str, Any]:
     }
 
 
-def governed_hook_config(existing: HookConfig | None) -> HookConfig:
+def _memory_hook_command() -> str:
+    """The command hook that recalls shared memory on the first turn.
+
+    It reads the scoped token and the endpoint from the sandbox environment,
+    fetches the namespace's budgeted index, caches the rendered block as its
+    one-shot guard, and prints the block as turn context. Any failure logs the
+    conversation id and the error class, marks the attempt, and prints nothing:
+    memory is an aid, never a precondition for a turn.
+    """
+    return (
+        "python3 -c '\n"
+        "import base64, json, os, sys, urllib.parse, urllib.request\n"
+        f'cache = "{MEMORY_CONTEXT_PATH}"\n'
+        'api_url = os.environ.get("MEMORY_API_URL", "").strip()\n'
+        'token = os.environ.get("MEMORY_TOKEN", "").strip()\n'
+        "if not api_url or not token or os.path.isfile(cache):\n"
+        "    raise SystemExit(0)\n"
+        'session = os.environ.get("OPENHANDS_SESSION_ID", "")\n'
+        "def fail(kind):\n"
+        "    try:\n"
+        "        os.makedirs(os.path.dirname(cache), exist_ok=True)\n"
+        '        open(cache, "w").close()\n'
+        "    except OSError:\n"
+        "        pass\n"
+        '    note = "memory unavailable (" + kind + ") for " + session\n'
+        "    print(note, file=sys.stderr)\n"
+        "try:\n"
+        '    payload = token.split(".")[1]\n'
+        '    raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))\n'
+        "    claims = json.loads(raw)\n"
+        '    namespace = str(claims["namespace"])\n'
+        '    url = api_url.rstrip("/") + "/v1/namespaces/"\n'
+        '    url += urllib.parse.quote(namespace, safe="") + "/index"\n'
+        "    request = urllib.request.Request(\n"
+        '        url, headers={"Authorization": "Bearer " + token}\n'
+        "    )\n"
+        "    with urllib.request.urlopen(request, timeout="
+        f"{MEMORY_FETCH_TIMEOUT_SECONDS}) as response:\n"
+        '        block = json.loads(response.read()).get("block")\n'
+        "    if not isinstance(block, str) or not block.strip():\n"
+        '        raise ValueError("the index has no block")\n'
+        "except Exception as error:\n"
+        "    fail(type(error).__name__)\n"
+        "    raise SystemExit(0)\n"
+        f'open_tag = "{MEMORY_CONTEXT_OPEN}"\n'
+        f'close_tag = "{MEMORY_CONTEXT_CLOSE}"\n'
+        "text = open_tag + chr(10) + block + chr(10) + close_tag\n"
+        "try:\n"
+        "    os.makedirs(os.path.dirname(cache), exist_ok=True)\n"
+        '    with open(cache, "w") as handle:\n'
+        "        handle.write(text)\n"
+        "except OSError:\n"
+        "    pass\n"
+        'print(json.dumps({"additionalContext": text}))\n'
+        "'"
+    )
+
+
+def memory_hook_config() -> dict[str, Any]:
+    """The hook config that injects the recalled index on the first turn."""
+    return {
+        "user_prompt_submit": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "name": "memory-context",
+                        "command": _memory_hook_command(),
+                        "timeout": 10,
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def governed_hook_config(
+    existing: HookConfig | None, *, memory_configured: bool = False
+) -> HookConfig:
     """Merge the governance hooks into an agent's own hook config."""
-    governance = HookConfig.model_validate(governance_hook_config())
-    merged = HookConfig.merge([existing, governance]) if existing else governance
-    return governance if merged is None else merged
+    configs = [existing] if existing else []
+    if memory_configured:
+        configs.append(HookConfig.model_validate(memory_hook_config()))
+    configs.append(HookConfig.model_validate(governance_hook_config()))
+    merged = HookConfig.merge(configs)
+    return configs[-1] if merged is None else merged
 
 
 def governed_launch_additions(

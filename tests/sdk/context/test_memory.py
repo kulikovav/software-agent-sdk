@@ -7,7 +7,11 @@ import pytest
 
 from openhands.sdk.agent import Agent
 from openhands.sdk.context.agent_context import AgentContext
-from openhands.sdk.context.memory import MEMORY_INDEX_RELPATH, load_memory
+from openhands.sdk.context.memory import (
+    MEMORY_INDEX_RELPATH,
+    load_memory,
+    render_memory_context,
+)
 from openhands.sdk.llm import LLM
 
 
@@ -276,3 +280,29 @@ def test_instructed_write_path_resolved_at_call_time(
 
     monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "later"))
     assert _advertised_user_memory_dir(agent) == tmp_path / "later" / "memory"
+
+
+# --- the outer section around a memory service's budgeted block ----------------
+
+
+def test_render_memory_context_wraps_the_service_block_without_nesting_it() -> None:
+    block = "<UNTRUSTED_CONTENT>\n- prefers uv\n</UNTRUSTED_CONTENT>"
+
+    rendered = render_memory_context(block)
+
+    assert rendered == f"<MEMORY_CONTEXT>\n{block}\n</MEMORY_CONTEXT>"
+    assert rendered.count("<UNTRUSTED_CONTENT>") == 1
+
+
+def test_render_memory_context_does_not_cut_an_over_budget_block() -> None:
+    block = "<UNTRUSTED_CONTENT>\n" + ("x" * 9000) + "\n</UNTRUSTED_CONTENT>"
+
+    rendered = render_memory_context(block)
+
+    assert rendered is not None
+    assert "x" * 9000 in rendered
+
+
+def test_render_memory_context_is_none_for_an_empty_block() -> None:
+    assert render_memory_context("") is None
+    assert render_memory_context("  \n") is None
