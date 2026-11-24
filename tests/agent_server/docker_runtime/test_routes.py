@@ -1211,7 +1211,7 @@ async def test_a_governed_start_verifies_the_gateway_ca(tmp_path, monkeypatch):
     monkeypatch.setattr(
         routers,
         "_prepare_forward",
-        AsyncMock(return_value=(lambda cipher: {}, None, None, False)),
+        AsyncMock(return_value=(lambda cipher: {}, None, None, False, None)),
     )
     seen: dict[str, object] = {}
 

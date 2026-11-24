@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
+import re
 import secrets
 import tempfile
+import time
+from collections.abc import Mapping
 from pathlib import Path
 from stat import S_ISREG
 from typing import Annotated
 from uuid import UUID
 
 from filelock import FileLock
-from pydantic import BaseModel, ConfigDict, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from openhands.agent_server.config import Config
 from openhands.agent_server.persistence.store import _get_persistence_dir
@@ -19,6 +26,79 @@ from openhands.sdk.conversation.request import ConversationContainerOptions
 from openhands.sdk.profiles.agent_profile import LaunchedAgentProfile
 from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.utils.pydantic_secrets import SecretField, cipher_context
+
+
+# The memory service verifies this wire format with the same secret.
+_MEMORY_TOKEN_VERSION = "v1"
+_MEMORY_NAMESPACE_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,127}$"
+_MEMORY_CLAIM_MAX_LENGTH = 200
+_MEMORY_NAMESPACE_MAX_LENGTH = 128
+_INVALID_NAMESPACE_CHARS = re.compile(r"[^a-z0-9._-]+")
+
+
+def _encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _claim_value(value: str | None) -> str | None:
+    """A tag value usable as a token claim, or none when it is empty or too long."""
+    claim = (value or "").strip()
+    if not claim or len(claim) > _MEMORY_CLAIM_MAX_LENGTH:
+        return None
+    return claim
+
+
+def _namespace_for(automation_id: str, conversation_id: UUID) -> str:
+    """A namespace bound to one automation, or to one conversation without one."""
+    if automation_id == conversation_id.hex:
+        return f"conversation-{conversation_id.hex}"
+    slug = _INVALID_NAMESPACE_CHARS.sub("-", automation_id.lower()).strip("._-")
+    if 0 < len(slug) <= _MEMORY_NAMESPACE_MAX_LENGTH and slug[0].isalnum():
+        return slug
+    return f"conversation-{conversation_id.hex}"
+
+
+class MemoryScope(BaseModel):
+    """The one namespace a conversation's memory token is bound to."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    namespace: str = Field(pattern=_MEMORY_NAMESPACE_PATTERN)
+    automation_id: str = Field(min_length=1, max_length=_MEMORY_CLAIM_MAX_LENGTH)
+    run_id: str = Field(min_length=1, max_length=_MEMORY_CLAIM_MAX_LENGTH)
+
+    @classmethod
+    def from_tags(
+        cls, conversation_id: UUID, tags: Mapping[str, str] | None
+    ) -> MemoryScope:
+        """Derive the scope from the automation tags a launch carries."""
+        values = tags or {}
+        automation_id = (
+            _claim_value(values.get("automationid")) or conversation_id.hex
+        )
+        run_id = _claim_value(values.get("automationrunid")) or conversation_id.hex
+        return cls(
+            namespace=_namespace_for(automation_id, conversation_id),
+            automation_id=automation_id,
+            run_id=run_id,
+        )
+
+
+def mint_memory_token(secret: str, scope: MemoryScope, ttl_seconds: int) -> str:
+    """Sign one short-lived token for a conversation's memory scope."""
+    claims = {
+        "namespace": scope.namespace,
+        "automation_id": scope.automation_id,
+        "run_id": scope.run_id,
+        "exp": int(time.time()) + ttl_seconds,
+    }
+    payload = _encode(
+        json.dumps(claims, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    signature = hmac.new(
+        secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256
+    ).digest()
+    return f"{_MEMORY_TOKEN_VERSION}.{payload}.{_encode(signature)}"
 
 
 class RuntimeIdentity(BaseModel):
@@ -32,6 +112,9 @@ class RuntimeIdentity(BaseModel):
     worktree_git_common_dir_path: Path | None = None
     launched_agent_profile: LaunchedAgentProfile | None = None
     container: ConversationContainerOptions | None = None
+    # The namespace and claims a launch minted its memory token from. Kept so a
+    # resumed conversation re-mints into the same scope.
+    memory_scope: MemoryScope | None = None
     # The gateway publishes the agent server at this URL. Only a create
     # response carries it, so the driver records it here and reuses it when it
     # adopts the sandbox after a restart.

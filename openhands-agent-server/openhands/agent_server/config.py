@@ -34,6 +34,8 @@ V1_SESSION_API_KEY_ENV = "OH_SESSION_API_KEYS_0"
 ENVIRONMENT_VARIABLE_PREFIX = "OH"
 CONFIG_PATH_ENV = "OPENHANDS_AGENT_SERVER_CONFIG_PATH"
 DEFAULT_CONFIG_PATH = Path("workspace/openhands_agent_server_config.json")
+# The signing secret the memory service verifies scoped tokens with.
+MEMORY_TOKEN_SECRET_ENV = "MEMORY_TOKEN_SECRET"
 # 20 minutes, matching the idle timeout used by OpenHands Cloud.
 DEFAULT_CONVERSATION_IDLE_TTL_SECONDS: Final[float] = 20 * 60.0
 ACPSkillSourcing = Literal["native", "openhands_managed"]
@@ -82,6 +84,12 @@ def _default_web_url() -> str | None:
         return web_url
 
     return None
+
+
+def _default_memory_token_secret() -> SecretStr | None:
+    """The deployment's memory signing secret, shared with the memory service."""
+    value = os.getenv(MEMORY_TOKEN_SECRET_ENV)
+    return SecretStr(value) if value else None
 
 
 DEFAULT_CONVERSATION_IMAGE = "ghcr.io/openhands/agent-server:latest-python"
@@ -488,6 +496,30 @@ class Config(BaseModel):
         description=(
             "CA bundle that verifies the gateway's HTTPS service URLs. Unset "
             "uses the system trust store."
+        ),
+    )
+    memory_api_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL of the shared memory service. A governed sandbox "
+            "receives it as MEMORY_API_URL."
+        ),
+    )
+    memory_token_secret: SecretStr | None = Field(
+        default_factory=_default_memory_token_secret,
+        description=(
+            "HMAC secret that signs a conversation's scoped memory token. The "
+            "memory service verifies tokens with the same MEMORY_TOKEN_SECRET. "
+            "Unset leaves governed sandboxes without a memory token."
+        ),
+    )
+    memory_token_ttl_seconds: int = Field(
+        default=604800,
+        ge=60,
+        description=(
+            "Lifetime of a conversation's scoped memory token. The runtime "
+            "extends it to the conversation retention window when that window "
+            "is longer."
         ),
     )
     conversation_image: str = DEFAULT_CONVERSATION_IMAGE

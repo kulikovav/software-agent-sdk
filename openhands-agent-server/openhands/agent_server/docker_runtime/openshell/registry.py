@@ -18,8 +18,16 @@ from openhands.agent_server.docker_runtime.openshell.client import (
     OpenShellGateway,
     load_sandbox_policy,
 )
-from openhands.agent_server.docker_runtime.openshell.events import PolicyEventWatcher
-from openhands.agent_server.docker_runtime.provisioning import RuntimeIdentity
+from openhands.agent_server.docker_runtime.openshell.events import (
+    MEMORY_API_URL_ENV,
+    MEMORY_TOKEN_ENV,
+    PolicyEventWatcher,
+)
+from openhands.agent_server.docker_runtime.provisioning import (
+    MemoryScope,
+    RuntimeIdentity,
+    mint_memory_token,
+)
 from openhands.agent_server.docker_runtime.registry import (
     OBSERVABILITY_ENV_VARS,
     ConversationContainer,
@@ -258,6 +266,8 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             )
             created = True
         elif sandbox.phase != pb.SANDBOX_PHASE_READY:
+            if sandbox.phase == pb.SANDBOX_PHASE_STOPPED:
+                self._refresh_environment(name, identity)
             sandbox = self.gateway.start(name)
         try:
             # The empty key is the unnamed service exposure.
@@ -306,6 +316,18 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             "OH_SECRET_KEY": identity.encryption_key.get_secret_value(),
             V1_SESSION_API_KEY_ENV: identity.api_key.get_secret_value(),
         }
+        token = self._memory_token(identity)
+        if token is not None:
+            environment[MEMORY_TOKEN_ENV] = token
+        if self.config.memory_api_url:
+            environment[MEMORY_API_URL_ENV] = self.config.memory_api_url
+        # The inner server starts from the image's module entry point, so it
+        # does not read the deployment's extension selection unless it is
+        # copied into the sandbox environment.
+        for name in ("EXTENSIONS_REF", "EXTENSIONS_PATH"):
+            value = os.environ.get(name)
+            if value:
+                environment[name] = value
         if identity.launched_agent_profile:
             environment["OH_RUNTIME_LAUNCHED_PROFILE"] = (
                 identity.launched_agent_profile.model_dump_json()
@@ -315,6 +337,42 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             if value:
                 environment[name] = value
         return environment
+
+    def _memory_token(self, identity: RuntimeIdentity) -> str | None:
+        """A token for this conversation's scope, or none when unconfigured."""
+        secret = self.config.memory_token_secret
+        scope: MemoryScope | None = identity.memory_scope
+        if secret is None or scope is None:
+            return None
+        return mint_memory_token(
+            secret.get_secret_value(), scope, self._memory_token_ttl_seconds()
+        )
+
+    def _memory_token_ttl_seconds(self) -> int:
+        """The configured lifetime, extended to cover the retention window."""
+        retention_days = self.config.conversation_storage_retention_days
+        if retention_days is None:
+            return self.config.memory_token_ttl_seconds
+        return max(
+            self.config.memory_token_ttl_seconds, int(retention_days * 86400)
+        )
+
+    def _refresh_environment(self, name: str, identity: RuntimeIdentity) -> None:
+        """Re-deliver the environment before a stopped sandbox restarts.
+
+        A stopped sandbox restarts with the environment it was created with, so
+        a re-minted memory token must reach it through the gateway's
+        storage-preserving update. A failed refresh degrades memory; it must
+        not block the resume.
+        """
+        if identity.memory_scope is None:
+            return
+        try:
+            self.gateway.update_environment(name, self._sandbox_environment(identity))
+        except grpc.RpcError:
+            logger.warning(
+                "Could not refresh the environment of sandbox %s", name, exc_info=True
+            )
 
     def _existing_sandbox_name(self, conversation_id: UUID) -> str:
         """The sandbox that holds this conversation, or its reserved name."""

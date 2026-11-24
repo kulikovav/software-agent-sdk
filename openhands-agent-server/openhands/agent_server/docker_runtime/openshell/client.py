@@ -13,7 +13,12 @@ import grpc
 import yaml
 from google.protobuf import json_format
 from openshell import SandboxClient, SandboxRef, ServiceExposure
-from openshell._proto import datamodel_pb2, openshell_pb2 as pb, sandbox_pb2
+from openshell._proto import (
+    datamodel_pb2,
+    openshell_pb2 as pb,
+    openshell_pb2_grpc,
+    sandbox_pb2,
+)
 
 from openhands.agent_server.docker_runtime.openshell.events import (
     NOTICES_DIR,
@@ -28,6 +33,7 @@ logger = get_logger(__name__)
 # governance loop calls the pinned gRPC stub directly.
 _LOG_LINES = 500
 _POLICY_TIMEOUT_SECONDS = 30.0
+_SANDBOX_UPDATE_TIMEOUT_SECONDS = 30.0
 
 # The policy file uses the CLI's YAML vocabulary. The proto uses the field name
 # ``filesystem`` and enum names, so the loader translates only those values.
@@ -216,6 +222,24 @@ class OpenShellGateway:
 
     def start(self, name: str) -> SandboxRef:
         return self._client.start(name, workspace=self.workspace)
+
+    def update_environment(self, name: str, environment: Mapping[str, str]) -> None:
+        """Replace a stopped sandbox's environment while keeping its storage.
+
+        The pinned SDK has no wrapper for the sandbox-updates service, so this
+        calls its generated stub on the same gateway channel.
+        """
+        stub = openshell_pb2_grpc.SandboxUpdatesStub(self._client._channel)
+        stub.UpdateSandbox(
+            pb.UpdateSandboxRequest(
+                workspace_scope=datamodel_pb2.WorkspaceSelector(
+                    workspace=self.workspace
+                ),
+                name=name,
+                environment=pb.SandboxMapUpdate(values=dict(environment)),
+            ),
+            timeout=_SANDBOX_UPDATE_TIMEOUT_SECONDS,
+        )
 
     def stop(self, name: str) -> None:
         """Stop the sandbox; a missing sandbox stays a no-op."""
