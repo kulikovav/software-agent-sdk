@@ -201,3 +201,15 @@ def test_server_info_advertises_tool_catalog_and_draft_materialize(client):
     capabilities = client.get("/server_info").json()["capabilities"]
     assert "tool_catalog_v1" in capabilities
     assert "agent_profile_draft_materialize_v1" in capabilities
+
+
+def test_server_info_advertises_plugin_starts(client):
+    capabilities = client.get("/server_info").json()["capabilities"]
+    assert "conversation_plugins_v1" in capabilities
+
+
+def test_server_info_advertises_bundle_delivery_only_with_a_sandbox():
+    """A bundle must run in a sandbox, so a local server never advertises it."""
+    assert "automation_bundle_v1" in sdr.build_server_info("openshell").capabilities
+    assert "automation_bundle_v1" in sdr.build_server_info("docker").capabilities
+    assert "automation_bundle_v1" not in sdr.build_server_info("local").capabilities

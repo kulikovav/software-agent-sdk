@@ -26,6 +26,10 @@ _start_time = time.time()
 _last_event_time = time.time()
 _initialization_complete = asyncio.Event()
 
+# Runtimes that provision a sandbox per conversation, so an automation bundle
+# can run inside it.
+_SANDBOXED_CONVERSATION_RUNTIMES = frozenset({"docker", "openshell"})
+
 
 def _package_version(dist_name: str) -> str:
     try:
@@ -96,6 +100,9 @@ class ServerInfo(BaseModel):
             "conversation_model_router_routes_v1",
             "conversation_configuration_additions_v1",
             "conversation_mcp_install_v1",
+            # The start's `plugins` field loads plugin sources, and a plugin
+            # entry's `config` reaches the plugin as config.json.
+            "conversation_plugins_v1",
         ]
     )
     app_backend_ingress_url: str | None = Field(
@@ -187,6 +194,11 @@ def build_server_info(
     info.capabilities.append("canvas_app_backend_enable_lifecycle_v1")
     if conversation_runtime == "openshell":
         info.capabilities.append("governed_conversation_runtime_v1")
+    # A bundle must run inside a sandbox, never on the host that received the
+    # start. Only a runtime that provisions a sandbox per conversation can
+    # promise that, so a local server does not advertise the delivery.
+    if conversation_runtime in _SANDBOXED_CONVERSATION_RUNTIMES:
+        info.capabilities.append("automation_bundle_v1")
     if app_backend_ingress_url:
         info.capabilities.append("canvas_app_backend_bridge_v1")
     return info
