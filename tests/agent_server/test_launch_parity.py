@@ -26,9 +26,13 @@ from openhands.agent_server.persistence import (
     ServerStores,
 )
 from openhands.sdk import LLM
-from openhands.sdk.conversation.request import StartConversationRequest
+from openhands.sdk.conversation.request import (
+    AutomationBundle,
+    StartConversationRequest,
+)
 from openhands.sdk.launch import finalize, preview_launch, resolve
 from openhands.sdk.mcp.config import MCPServer
+from openhands.sdk.plugin import PluginSource
 from openhands.sdk.profiles import OpenHandsAgentProfile
 from openhands.sdk.profiles.agent_profile import ProfileVerificationSettings
 from openhands.sdk.settings.model import (
@@ -339,6 +343,37 @@ def test_a_governed_start_forwards_its_repositories_to_the_container():
     )
 
     assert StartConversationRequest.model_validate(payload).repositories == repositories
+
+
+def test_a_governed_start_forwards_its_bundle_and_plugin_config():
+    """A bundle and a plugin's config reach the sandbox unchanged.
+
+    Both are start instructions the outer server must not act on: only the
+    sandbox extracts the archive and runs the entrypoint.
+    """
+    bundle = AutomationBundle(
+        entrypoint="python3 main.py",
+        setup_script_path="setup.sh",
+        config={"trigger_label": "bug"},
+        tarball_b64="AA==",
+    )
+    plugins = [
+        PluginSource(source="github:acme/plugin", config={"trigger_label": "bug"})
+    ]
+    request = StartConversationRequest(
+        agent_profile_id=uuid4(),
+        workspace=LocalWorkspace(working_dir="/workspace"),
+        plugins=plugins,
+        bundle=bundle,
+    )
+
+    payload = forward_to_runtime(
+        request, None, {}, Cipher("container-key"), load_memory=False
+    )
+
+    received = StartConversationRequest.model_validate(payload)
+    assert received.bundle == bundle
+    assert received.plugins == plugins
 
 
 def test_inline_stored_and_agent_settings_sources_launch_the_same_agent(

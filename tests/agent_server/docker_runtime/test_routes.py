@@ -1,8 +1,11 @@
 import asyncio
+import base64
+import io
 import json
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -1245,3 +1248,68 @@ async def test_a_governed_start_verifies_the_gateway_ca(tmp_path, monkeypatch):
 
     # A published service URL is signed by the gateway CA, not by a public one.
     assert seen["verify"] == container.ca_bundle
+
+
+def _bundle_payload(entrypoint: str) -> dict[str, object]:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        content = b"print('hello')\n"
+        member = tarfile.TarInfo("main.py")
+        member.size = len(content)
+        tar.addfile(member, io.BytesIO(content))
+    return {
+        "entrypoint": entrypoint,
+        "setup_script_path": "setup.sh",
+        "config": {"trigger_label": "bug"},
+        "tarball_b64": base64.b64encode(buffer.getvalue()).decode("ascii"),
+    }
+
+
+async def test_a_governed_start_forwards_its_bundle_and_runs_nothing_on_the_host(
+    tmp_path, monkeypatch
+):
+    """The governed host only forwards; the sandbox unpacks and runs the bundle."""
+    registry = _governed_registry(tmp_path)
+    container = SimpleNamespace(
+        host="https://default--oh-test.openshell.localhost:17670",
+        api_key="inner-key",
+        ca_bundle=None,
+        container_id="oh-test",
+    )
+    monkeypatch.setattr(registry, "get_or_create", AsyncMock(return_value=container))
+    monkeypatch.setattr(registry, "acquire_lease", lambda _id: lambda: None)
+    monkeypatch.setattr(registry, "copy_conversation_record", lambda _id: True)
+    sentinel = tmp_path / "host-sentinel"
+    bundle = _bundle_payload(f"touch {sentinel}")
+    seen: dict[str, Any] = {}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, _url, **kwargs):
+            seen.update(kwargs)
+            return httpx.Response(201, json={"id": "conversation"})
+
+    monkeypatch.setattr(routers.httpx, "AsyncClient", Client)
+    body = _governed_start_body("openshell:resolve:env:v1_LITELLM_API_KEY")
+    body["bundle"] = bundle
+    body["plugins"] = [
+        {"source": "github:acme/plugin", "config": {"trigger_label": "bug"}}
+    ]
+
+    await routers.start_docker_conversation(body, registry)
+
+    forwarded = seen["json"]
+    assert forwarded["bundle"] == bundle
+    assert forwarded["plugins"][0]["config"] == {"trigger_label": "bug"}
+    # Nothing ran and nothing was unpacked on the governed host.
+    assert not sentinel.exists()
+    assert list(tmp_path.rglob("main.py")) == []
+    assert list(tmp_path.rglob("config.json")) == []
