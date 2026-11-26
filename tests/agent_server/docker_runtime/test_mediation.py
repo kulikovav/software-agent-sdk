@@ -49,7 +49,10 @@ def _registry(runtime_config: Config) -> DockerConversationRegistry:
     return cast(
         DockerConversationRegistry,
         SimpleNamespace(
-            config=runtime_config, stores=ServerStores.from_config(runtime_config)
+            config=runtime_config,
+            stores=ServerStores.from_config(runtime_config),
+            governed=False,
+            inner_workspace_root="/workspace",
         ),
     )
 
@@ -100,7 +103,12 @@ def _governed_registry(
 ) -> DockerConversationRegistry:
     return cast(
         DockerConversationRegistry,
-        SimpleNamespace(config=runtime_config, governed=True),
+        SimpleNamespace(
+            config=runtime_config,
+            stores=ServerStores.from_config(runtime_config),
+            governed=True,
+            inner_workspace_root="/sandbox",
+        ),
     )
 
 
