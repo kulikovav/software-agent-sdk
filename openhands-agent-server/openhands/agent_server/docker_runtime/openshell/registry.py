@@ -50,9 +50,7 @@ _SANDBOX_HOME = "/sandbox"
 _SANDBOX_CONVERSATIONS = f"{_SANDBOX_HOME}/conversations"
 _SANDBOX_PERSISTENCE = f"{_SANDBOX_HOME}/.openhands"
 _AGENT_PORT = 8000
-_RESUMABLE_PHASES = frozenset(
-    {pb.SANDBOX_PHASE_STOPPED, pb.SANDBOX_PHASE_SUSPENDED}
-)
+_RESUMABLE_PHASES = frozenset({pb.SANDBOX_PHASE_STOPPED, pb.SANDBOX_PHASE_SUSPENDED})
 # The agent-server image also ships a frozen ``openhands-agent-server`` binary
 # built from the upstream SDK release. That binary embeds its own copy of the
 # server, so it never sees an ``openhands-agent-server`` package installed
@@ -358,9 +356,7 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
         retention_days = self.config.conversation_storage_retention_days
         if retention_days is None:
             return self.config.memory_token_ttl_seconds
-        return max(
-            self.config.memory_token_ttl_seconds, int(retention_days * 86400)
-        )
+        return max(self.config.memory_token_ttl_seconds, int(retention_days * 86400))
 
     def _refresh_environment(self, name: str, identity: RuntimeIdentity) -> None:
         """Re-deliver the environment before a resumable sandbox restarts.
@@ -384,9 +380,7 @@ class OpenShellConversationRegistry(DockerConversationRegistry):
             )
         )
         try:
-            self.gateway.update_environment(
-                name, environment, request_id=request_id
-            )
+            self.gateway.update_environment(name, environment, request_id=request_id)
         except grpc.RpcError:
             logger.warning(
                 "Could not refresh the environment of sandbox %s", name, exc_info=True

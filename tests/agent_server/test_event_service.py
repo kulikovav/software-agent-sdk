@@ -4262,9 +4262,7 @@ async def test_a_memory_token_from_the_sandbox_is_masked_in_output(
     ):
         await service.start()
 
-    assert registry.mask_secrets_in_output(f"echo {token}") == (
-        "echo <secret-hidden>"
-    )
+    assert registry.mask_secrets_in_output(f"echo {token}") == ("echo <secret-hidden>")
 
 
 @pytest.mark.asyncio

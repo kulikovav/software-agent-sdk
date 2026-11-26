@@ -153,9 +153,7 @@ class OpenShellGateway:
         # blank, and an empty quantity makes the gateway reject the sandbox, so
         # blank is treated as unset.
         limits = {
-            key: value
-            for key, value in (("cpu", cpu), ("memory", memory))
-            if value
+            key: value for key, value in (("cpu", cpu), ("memory", memory)) if value
         }
         if limits:
             # The gateway reads the Kubernetes limits shape out of this Struct
