@@ -75,7 +75,7 @@ def _normalize_tool_call_indices(chunks: Iterable[Any]) -> None:
 
     for chunk in chunks:
         for choice in chunk.choices or ():
-            delta = getattr(choice, "delta", None)
+            delta = choice.get("delta") if isinstance(choice, dict) else choice.delta
             if delta is None:
                 continue
             # A ModelResponse rewraps StreamingChoices, so delta can be a dict.

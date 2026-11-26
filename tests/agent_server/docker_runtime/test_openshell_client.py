@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import grpc
 import pytest
 from openshell import SandboxRef, SandboxStatusRef
@@ -219,11 +221,9 @@ def test_update_environment_sends_the_map_and_an_idempotency_key(monkeypatch):
     class FakeSdk:
         _channel = object()
 
-    gateway._client = FakeSdk()
+    gateway._client = cast(Any, FakeSdk())
 
-    gateway.update_environment(
-        "demo", {"MEMORY_TOKEN": ""}, request_id="refresh-1"
-    )
+    gateway.update_environment("demo", {"MEMORY_TOKEN": ""}, request_id="refresh-1")
 
     request, timeout = requests[0]
     assert request.workspace_scope.workspace == "default"

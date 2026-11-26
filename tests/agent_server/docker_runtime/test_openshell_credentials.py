@@ -245,9 +245,7 @@ def test_a_launched_sandbox_holds_one_token_for_its_scope(tmp_path, monkeypatch)
 
 def test_a_token_lasts_for_the_retention_window(tmp_path, monkeypatch):
     gateway = FakeGateway()
-    registry = make_registry(
-        tmp_path, gateway, conversation_storage_retention_days=30
-    )
+    registry = make_registry(tmp_path, gateway, conversation_storage_retention_days=30)
     conversation_id = uuid4()
     monkeypatch.setattr(
         "openhands.agent_server.docker_runtime.provisioning.time",
@@ -257,7 +255,7 @@ def test_a_token_lasts_for_the_retention_window(tmp_path, monkeypatch):
     environment = launch(gateway, registry, monkeypatch, conversation_id, {})
 
     claims = claims_of(environment[MEMORY_TOKEN_ENV])
-    assert int(claims["exp"]) == 1_900_000_000 + 30 * 86400
+    assert int(str(claims["exp"])) == 1_900_000_000 + 30 * 86400
 
 
 def test_the_launch_mirrors_the_extension_selection(tmp_path, monkeypatch):
@@ -282,9 +280,7 @@ def test_no_forbidden_key_enters_the_sandbox(tmp_path, monkeypatch):
     identity = registry.provisioning.load(conversation_id)
     assert environment["OH_SECRET_KEY"] == identity.encryption_key.get_secret_value()
     assert environment["OH_SECRET_KEY"] != HOST_SECRET_KEY
-    assert (
-        environment[V1_SESSION_API_KEY_ENV] == identity.api_key.get_secret_value()
-    )
+    assert environment[V1_SESSION_API_KEY_ENV] == identity.api_key.get_secret_value()
     values = set(environment.values())
     assert OUTER_SESSION_KEY not in values
     assert HOST_SECRET_KEY not in values
@@ -320,7 +316,7 @@ def test_a_resumed_sandbox_receives_a_fresh_token(tmp_path, monkeypatch):
     assert name == created["name"]
     fresh_token = refreshed[MEMORY_TOKEN_ENV]
     assert fresh_token != first_token
-    assert int(claims_of(fresh_token)["exp"]) == (
+    assert int(str(claims_of(fresh_token)["exp"])) == (
         1_900_000_000 + registry.config.memory_token_ttl_seconds
     )
 
@@ -385,9 +381,7 @@ def test_a_refresh_clears_a_token_the_secret_no_longer_mints(tmp_path, monkeypat
     created = gateway.created[0]
     assert created["environment"][MEMORY_TOKEN_ENV].startswith("v1.")
 
-    registry.config = registry.config.model_copy(
-        update={"memory_token_secret": None}
-    )
+    registry.config = registry.config.model_copy(update={"memory_token_secret": None})
     stop_existing(
         gateway, created["name"], pb.SANDBOX_PHASE_STOPPED, conversation_id.hex
     )
@@ -520,7 +514,7 @@ def test_the_delivered_token_authenticates_to_the_memory_service(tmp_path, monke
 
     sys.path.insert(0, source)
     try:
-        from openhands_memory.auth import verify_token
+        from openhands_memory.auth import verify_token  # pyright: ignore[reportMissingImports]
     finally:
         sys.path.remove(source)
     claims = verify_token(MEMORY_TOKEN_SECRET, environment[MEMORY_TOKEN_ENV])
