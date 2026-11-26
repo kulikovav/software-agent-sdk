@@ -12,8 +12,10 @@ from uuid import UUID
 from fastapi import (
     APIRouter,
     Depends,
+    HTTPException,
     Query,
 )
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from openhands.agent_server.conversation_registry import ConversationRegistry
