@@ -18,6 +18,12 @@ from weakref import WeakValueDictionary
 import httpx
 from pydantic import BaseModel
 
+from openhands.agent_server.automation_bundle import (
+    ENTRYPOINT_TIMEOUT_SECONDS,
+    automation_bundle_command,
+    prepare_automation_bundle,
+    write_workspace_config,
+)
 from openhands.agent_server.config import ACPSkillSourcing, Config, WebhookSpec
 from openhands.agent_server.conversation_lease import (
     DEFAULT_LEASE_TTL_SECONDS,
@@ -60,6 +66,7 @@ from openhands.agent_server.models import (
     ConversationInfo,
     ConversationPage,
     ConversationSortOrder,
+    ExecuteBashRequest,
     LaunchedAgentProfile,
     StartChildConversationRequest,
     StartChildConversationResponse,
@@ -127,6 +134,7 @@ from openhands.sdk.llm.call_context import LLMCallContext
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.mcp.utils import MCPToolProvider
 from openhands.sdk.observability import OPERATION_METADATA_KEY, observe
+from openhands.sdk.plugin import PluginSource
 from openhands.sdk.secret import SecretSource
 from openhands.sdk.tool.client_tool import register_client_tools
 from openhands.sdk.tool.registry import get_tool_module_qualnames, is_tool_available
@@ -137,6 +145,7 @@ from openhands.sdk.workspace.repo import clone_repos
 
 
 if TYPE_CHECKING:
+    from openhands.agent_server.bash_service import BashEventService
     from openhands.sdk.subagent.schema import AgentDefinition
 
 
@@ -394,6 +403,23 @@ def _clone_conversation_repositories(
             "Could not clone the conversation's repositories: "
             + ", ".join(result.failed_repos)
         )
+
+
+def _plugin_workspace_config(
+    plugins: list[PluginSource] | None,
+) -> dict[str, Any] | None:
+    """The one plugin config a start delivers as ``config.json``.
+
+    A plugin's commands run from the conversation workspace, so its
+    install-time config is written there. ``config.json`` holds one object, so
+    a start naming more than one config is refused instead of dropping one.
+    """
+    configs = [plugin.config for plugin in plugins or () if plugin.config]
+    if len(configs) > 1:
+        raise AgentLaunchError(
+            "A start may deliver at most one plugin config: config.json holds one"
+        )
+    return configs[0] if configs else None
 
 
 def _compose_conversation_info(
@@ -654,6 +680,9 @@ class ConversationService:
     conversations_dir: Path = field()
     webhook_specs: list[WebhookSpec] = field(default_factory=list)
     session_api_key: str | None = field(default=None)
+    # Runs an automation bundle's setup and entrypoint, so their output lands
+    # on the same bash events the run log reads. None cannot run a bundle.
+    bash_event_service: "BashEventService | None" = field(default=None)
     cipher: Cipher | None = None
     runtime_cipher_resolver: Callable[[UUID], Cipher] | None = None
     mcp_tool_provider: MCPToolProvider | None = None
@@ -1999,6 +2028,9 @@ class ConversationService:
                 # A start's repository clone happens once, before the record
                 # exists; it is not conversation state a restart replays.
                 "repositories",
+                # A bundle is delivered once, into a new conversation's
+                # workspace; a restart must never run its entrypoint again.
+                "bundle",
             },
         )
         launched_agent_profile = launched.profile or runtime_launched_profile
@@ -2080,6 +2112,39 @@ class ConversationService:
                     clone_repositories,
                     stored.workspace.working_dir,
                     stored.secrets,
+                )
+            # A start's bundle or plugin config is delivered once, into the
+            # same workspace, before the record exists. The entrypoint is
+            # dispatched as one bash event, so its output outlives the start
+            # response and lands where the run log reads it.
+            workspace_dir = stored.workspace.working_dir
+            bundle = reuse_request.bundle if reuse_request is not None else None
+            plugin_config = _plugin_workspace_config(
+                reuse_request.plugins if reuse_request is not None else None
+            )
+            if bundle is not None and plugin_config is not None:
+                raise AgentLaunchError(
+                    "A start delivers a bundle or a plugin config, not both"
+                )
+            if bundle is not None:
+                if self.bash_event_service is None:
+                    raise AgentLaunchError(
+                        "This server cannot run an automation bundle: it has no"
+                        " bash event service"
+                    )
+                await asyncio.to_thread(
+                    prepare_automation_bundle, bundle, workspace_dir
+                )
+                await self.bash_event_service.start_bash_command(
+                    ExecuteBashRequest(
+                        command=automation_bundle_command(bundle),
+                        cwd=workspace_dir,
+                        timeout=ENTRYPOINT_TIMEOUT_SECONDS,
+                    )
+                )
+            elif plugin_config is not None:
+                await asyncio.to_thread(
+                    write_workspace_config, plugin_config, workspace_dir
                 )
             # New conversation: the agent is written to base_state.json (its
             # single source of truth), not to meta.json. Pass it explicitly.
@@ -2866,7 +2931,10 @@ class ConversationService:
 
     @classmethod
     def get_instance(
-        cls, config: Config, stores: ServerStores
+        cls,
+        config: Config,
+        stores: ServerStores,
+        bash_event_service: "BashEventService | None" = None,
     ) -> "ConversationService":
         return ConversationService(
             conversations_dir=config.conversations_path,
@@ -2874,6 +2942,7 @@ class ConversationService:
             session_api_key=(
                 config.session_api_keys[0] if config.session_api_keys else None
             ),
+            bash_event_service=bash_event_service,
             cipher=config.cipher,
             mcp_tool_provider=create_settings_backed_mcp_tool_provider(
                 config, stores.settings

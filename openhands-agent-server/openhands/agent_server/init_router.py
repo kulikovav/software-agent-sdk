@@ -351,12 +351,14 @@ class InitService:
             )
             await self._use_telemetry_of(new_config, stores)
 
-            service = ConversationService.get_instance(new_config, stores)
-            conversation_registry = create_conversation_registry(new_config, stores)
-            conversation_registry.configure_service(service)
             bash_svc = BashEventService(
                 bash_events_dir=new_config.bash_events_dir, cipher=new_config.cipher
             )
+            service = ConversationService.get_instance(
+                new_config, stores, bash_event_service=bash_svc
+            )
+            conversation_registry = create_conversation_registry(new_config, stores)
+            conversation_registry.configure_service(service)
             await started.enter_async_context(bash_svc)
             await started.enter_async_context(service)
             started.push_async_callback(conversation_registry.shutdown)

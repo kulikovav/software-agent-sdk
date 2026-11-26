@@ -1,6 +1,9 @@
 import asyncio
+import base64
+import io
 import json
 import socket
+import tarfile
 import tempfile
 import threading
 import time
@@ -16,6 +19,7 @@ import pytest
 from litellm.types.utils import ChatCompletionMessageToolCall, Function
 from pydantic import SecretStr
 
+from openhands.agent_server.bash_service import BashEventService
 from openhands.agent_server.conversation_lease import (
     LEASE_FILE_NAME,
     ConversationOwnershipLostError,
@@ -32,9 +36,11 @@ from openhands.agent_server.conversation_service import (
 from openhands.agent_server.event_service import EventService
 from openhands.agent_server.exceptions import ServiceInactive, UnavailableAgentTool
 from openhands.agent_server.models import (
+    BashOutput,
     ConversationInfo,
     ConversationPage,
     ConversationSortOrder,
+    ExecuteBashRequest,
     StartConversationRequest,
     StoredConversation,
     UpdateConversationRequest,
@@ -43,7 +49,10 @@ from openhands.agent_server.utils import safe_rmtree as _safe_rmtree
 from openhands.sdk import LLM, Agent, AgentBase, Message, Tool
 from openhands.sdk.agent.acp_agent import ACPAgent
 from openhands.sdk.conversation.impl.local_conversation import LocalConversation
-from openhands.sdk.conversation.request import ConversationWorktreeOptions
+from openhands.sdk.conversation.request import (
+    AutomationBundle,
+    ConversationWorktreeOptions,
+)
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
@@ -59,6 +68,7 @@ from openhands.sdk.launch import AgentLaunchError
 from openhands.sdk.llm import MessageToolCall, TextContent
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.mcp.config import dump_mcp_config
+from openhands.sdk.plugin import PluginSource
 from openhands.sdk.secret import SecretSource, StaticSecret
 from openhands.sdk.security.confirmation_policy import NeverConfirm
 from openhands.sdk.security.risk import SecurityRisk
@@ -678,6 +688,186 @@ async def test_a_repeated_start_does_not_clone_again(conversation_service, tmp_p
 
     assert not created
     assert not clone.exists()
+
+
+def _bundle_tarball(files: dict[str, bytes]) -> str:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, content in files.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(content)
+            member.mode = 0o644
+            tar.addfile(member, io.BytesIO(content))
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+class _RecordingBashEvents:
+    """Stands in for the bash event service a real server dispatches to."""
+
+    def __init__(self) -> None:
+        self.requests: list[ExecuteBashRequest] = []
+        self.tasks: list[asyncio.Task] = []
+
+    async def start_bash_command(self, request: ExecuteBashRequest):
+        self.requests.append(request)
+        task = asyncio.create_task(asyncio.sleep(0))
+        self.tasks.append(task)
+        return MagicMock(), task
+
+
+@pytest.mark.asyncio
+async def test_start_conversation_extracts_its_bundle_and_starts_the_entrypoint(
+    conversation_service, tmp_path
+):
+    """A bundle lands in the workspace and runs as one bash command there."""
+    workspace_dir = tmp_path / "workspace"
+    bash_events = _RecordingBashEvents()
+    conversation_service.bash_event_service = bash_events
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        bundle=AutomationBundle(
+            entrypoint="python3 main.py",
+            setup_script_path="setup.sh",
+            config={"trigger_label": "bug"},
+            tarball_b64=_bundle_tarball(
+                {
+                    "main.py": b"print('hello')\n",
+                    "setup.sh": b"pip install .\n",
+                }
+            ),
+        ),
+    )
+
+    _, created = await conversation_service.start_conversation(request)
+
+    assert created
+    assert (workspace_dir / "main.py").read_text() == "print('hello')\n"
+    assert (workspace_dir / "setup.sh").read_text() == "pip install .\n"
+    assert json.loads((workspace_dir / "config.json").read_text()) == {
+        "trigger_label": "bug"
+    }
+    [command] = bash_events.requests
+    assert command.command == "bash setup.sh && python3 main.py"
+    assert command.cwd == str(workspace_dir)
+
+
+@pytest.mark.asyncio
+async def test_a_bundle_entrypoint_writes_to_the_bash_events_run_logs_read(
+    conversation_service, tmp_path
+):
+    """The entrypoint's output is ordinary BashOutput, not a second log path."""
+    workspace_dir = tmp_path / "workspace"
+    async with BashEventService(bash_events_dir=tmp_path / "bash-events") as bash:
+        conversation_service.bash_event_service = bash
+        request = StartConversationRequest(
+            agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+            workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+            confirmation_policy=NeverConfirm(),
+            bundle=AutomationBundle(
+                entrypoint="python3 main.py",
+                config={},
+                tarball_b64=_bundle_tarball(
+                    {"main.py": b"print('bre110-entrypoint-output')\n"}
+                ),
+            ),
+        )
+
+        _, created = await conversation_service.start_conversation(request)
+        assert created
+
+        outputs = []
+        for _ in range(100):
+            page = await bash.search_bash_events(kind__eq="BashOutput")
+            outputs = [item for item in page.items if isinstance(item, BashOutput)]
+            if any(
+                "bre110-entrypoint-output" in (output.stdout or "")
+                for output in outputs
+            ):
+                break
+            await asyncio.sleep(0.05)
+
+    assert any(
+        "bre110-entrypoint-output" in (output.stdout or "") for output in outputs
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_start_with_an_unsafe_bundle_is_refused_before_the_record(
+    conversation_service, tmp_path
+):
+    """An escaping archive never creates a conversation or a file."""
+    workspace_dir = tmp_path / "workspace"
+    conversation_service.bash_event_service = _RecordingBashEvents()
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        bundle=AutomationBundle(
+            entrypoint="python3 main.py",
+            config={},
+            tarball_b64=_bundle_tarball({"../escaped.txt": b"owned\n"}),
+        ),
+    )
+
+    with pytest.raises(AgentLaunchError, match="unsafe path"):
+        await conversation_service.start_conversation(request)
+
+    assert await conversation_service.count_conversations() == 0
+    assert not (tmp_path / "escaped.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_start_with_a_bundle_and_a_plugin_config_is_refused(
+    conversation_service, tmp_path
+):
+    """The two deliveries share config.json, so they cannot be combined."""
+    conversation_service.bash_event_service = _RecordingBashEvents()
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(tmp_path / "workspace")),
+        confirmation_policy=NeverConfirm(),
+        plugins=[PluginSource(source="github:acme/plugin", config={"a": 1})],
+        bundle=AutomationBundle(
+            entrypoint="python3 main.py",
+            config={},
+            tarball_b64=_bundle_tarball({"main.py": b"print('hello')\n"}),
+        ),
+    )
+
+    with pytest.raises(AgentLaunchError, match="not both"):
+        await conversation_service.start_conversation(request)
+
+    assert await conversation_service.count_conversations() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_start_does_not_run_the_bundle_again(
+    conversation_service, tmp_path
+):
+    """A repeat start reuses the conversation; its entrypoint runs once."""
+    workspace_dir = tmp_path / "workspace"
+    bash_events = _RecordingBashEvents()
+    conversation_service.bash_event_service = bash_events
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        conversation_id=uuid4(),
+        bundle=AutomationBundle(
+            entrypoint="python3 main.py",
+            config={},
+            tarball_b64=_bundle_tarball({"main.py": b"print('hello')\n"}),
+        ),
+    )
+
+    _, created = await conversation_service.start_conversation(request)
+    assert created
+    _, created = await conversation_service.start_conversation(request)
+
+    assert not created
+    assert len(bash_events.requests) == 1
 
 
 @pytest.mark.asyncio

@@ -425,13 +425,16 @@ async def api_lifespan(api: FastAPI) -> AsyncIterator[None]:
         # A key that came from the config file is visible only in ``config``;
         # in-process callers of this server read it from the environment.
         export_session_api_key(config)
-        service = ConversationService.get_instance(config, context.stores)
-        mark_initialization_complete()
-        logger.info("Server initialization complete - ready to serve requests")
-
+        # Built first: a conversation start delivers an automation bundle's
+        # output through these events, and the service owns that dispatch.
         bash_svc = BashEventService(
             bash_events_dir=config.bash_events_dir, cipher=config.cipher
         )
+        service = ConversationService.get_instance(
+            config, context.stores, bash_event_service=bash_svc
+        )
+        mark_initialization_complete()
+        logger.info("Server initialization complete - ready to serve requests")
 
         conversation_registry.configure_service(service)
         # Runtime cleanup must precede external-catalog recovery so stale

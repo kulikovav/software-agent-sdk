@@ -10,6 +10,7 @@ These tests verify that:
    LocalConversation loads them lazily on first run()/send_message()
 """
 
+import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +32,7 @@ from openhands.sdk.conversation.state import (
     ConversationState,
 )
 from openhands.sdk.hooks import HookConfig, HookDefinition, HookMatcher, HookType
+from openhands.sdk.launch import AgentLaunchError
 from openhands.sdk.plugin import PluginSource
 from openhands.sdk.workspace import LocalWorkspace
 
@@ -43,8 +45,6 @@ def create_test_plugin_dir(
     mcp_config: dict | None = None,
 ) -> Path:
     """Create a test plugin directory structure."""
-    import json
-
     plugin_dir = tmp_path / "test-plugin"
     plugin_dir.mkdir(parents=True)
 
@@ -467,3 +467,53 @@ async def test_start_conversation_stores_both_hooks_and_plugins_for_lazy_merge(
             # Plugins are stored for lazy loading
             assert stored.plugins is not None
             assert len(stored.plugins) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_config_is_delivered_where_the_plugin_runs(
+    conversation_service, tmp_path
+):
+    """A plugin entry's config reaches the workspace as config.json."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        plugins=[
+            PluginSource(
+                source="github:acme/plugin",
+                config={"trigger_label": "bug", "repos": ["owner/repo"]},
+            )
+        ],
+    )
+
+    _, created = await conversation_service.start_conversation(request)
+
+    assert created
+    assert json.loads((workspace_dir / "config.json").read_text()) == {
+        "trigger_label": "bug",
+        "repos": ["owner/repo"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_start_naming_two_plugin_configs_is_refused(
+    conversation_service, tmp_path
+):
+    """config.json holds one object, so the start is refused, not truncated."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        plugins=[
+            PluginSource(source="github:acme/first", config={"a": 1}),
+            PluginSource(source="github:acme/second", config={"b": 2}),
+        ],
+    )
+
+    with pytest.raises(AgentLaunchError, match="at most one plugin config"):
+        await conversation_service.start_conversation(request)
+
+    assert not (workspace_dir / "config.json").exists()
+    assert await conversation_service.count_conversations() == 0
