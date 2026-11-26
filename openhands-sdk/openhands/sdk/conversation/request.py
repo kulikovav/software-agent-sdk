@@ -445,6 +445,52 @@ class ConversationConfig(BaseModel):
     )
 
 
+# A bundle's archive is untrusted upload content. The agent server caps it
+# before extraction; this constant is that bound, shared with the wire model.
+AUTOMATION_BUNDLE_MAX_ARCHIVE_BYTES: int = 64 * 1024 * 1024
+
+
+class AutomationBundle(BaseModel):
+    """An automation bundle a governed start carries into its sandbox.
+
+    The archive is untrusted input from an automation author. A server that
+    accepts this field validates and extracts it into the conversation's
+    workspace, writes ``config`` as ``config.json`` at the extracted root,
+    runs ``setup_script_path`` once if given, then starts ``entrypoint``
+    there. The start is a one-shot instruction: it is not conversation state.
+    """
+
+    entrypoint: str = Field(
+        min_length=1,
+        max_length=2000,
+        description=(
+            "Shell command that runs inside the extracted root. Automation run "
+            "output comes from the command's bash events."
+        ),
+    )
+    setup_script_path: str | None = Field(
+        default=None,
+        description=(
+            "Optional path, relative to the extracted root, of a script to run "
+            "once with bash before `entrypoint`."
+        ),
+    )
+    config: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "JSON written as `config.json` at the extracted root, beside the "
+            "entrypoint."
+        ),
+    )
+    tarball_b64: str = Field(
+        min_length=1,
+        description=(
+            "Base64 of a gzipped tar holding the bundle. The archive is "
+            "validated and size-capped before extraction; it is never logged."
+        ),
+    )
+
+
 class StartConversationRequest(ConversationConfig):
     """Payload to create a new conversation.
 
@@ -508,6 +554,16 @@ class StartConversationRequest(ConversationConfig):
             "secrets as provider tokens, exactly as a preset runner clones a "
             "run's repositories. A failed clone refuses the start. Empty (the "
             "default) clones nothing."
+        ),
+    )
+    bundle: AutomationBundle | None = Field(
+        default=None,
+        description=(
+            "Automation bundle to deliver into the conversation's workspace "
+            "before its first turn. The server validates the archive, extracts "
+            "it, writes `config.json`, then starts the entrypoint through its "
+            "bash events. A start that names no bundle is unchanged. This is a "
+            "one-shot start instruction, not conversation state."
         ),
     )
 

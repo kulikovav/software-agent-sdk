@@ -47,6 +47,14 @@ class PluginSource(BaseModel):
             "Only relevant for git sources, not local paths."
         ),
     )
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Install-time configuration an automation's conversation start "
+            "delivers as `config.json` in the conversation workspace, where "
+            "the plugin's commands run. Unset leaves the plugin's defaults."
+        ),
+    )
 
     @field_validator("repo_path")
     @classmethod
