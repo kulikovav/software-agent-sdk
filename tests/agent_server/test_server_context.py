@@ -162,8 +162,10 @@ def test_a_failed_init_leaves_the_dormant_context_in_place(
     started: list[ConversationService] = []
     real_get_instance = ConversationService.get_instance
 
-    def recording_get_instance(config, stores):
-        service = real_get_instance(config, stores)
+    def recording_get_instance(config, stores, bash_event_service=None):
+        service = real_get_instance(
+            config, stores, bash_event_service=bash_event_service
+        )
         started.append(service)
         return service
 

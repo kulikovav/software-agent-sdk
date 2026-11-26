@@ -103,10 +103,10 @@ async def test_failed_init_emits_no_start_and_retry_emits_exactly_one(
     boom = {"raise": True}
     real_get_instance = init_mod.ConversationService.get_instance
 
-    def _maybe_boom(config, stores):
+    def _maybe_boom(config, stores, bash_event_service=None):
         if boom["raise"]:
             raise RuntimeError("get_instance failed")
-        return real_get_instance(config, stores)
+        return real_get_instance(config, stores, bash_event_service=bash_event_service)
 
     monkeypatch.setattr(init_mod.ConversationService, "get_instance", _maybe_boom)
 
