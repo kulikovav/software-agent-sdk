@@ -288,6 +288,8 @@ export type {
   ConfirmationResponseRequest,
   CreateConversationRequest,
   CreateACPConversationRequest,
+  AutomationBundle,
+  PluginSource,
   UpdateConversationRequest,
   UpdateSecretsRequest,
   StaticSecret,

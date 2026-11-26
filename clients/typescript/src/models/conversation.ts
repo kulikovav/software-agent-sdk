@@ -119,6 +119,34 @@ export interface ConfirmationResponseRequest {
   reason?: string;
 }
 
+/** A plugin source a conversation loads, with its optional install-time config. */
+export interface PluginSource {
+  /** `github:owner/repo`, any git URL, or a local path. */
+  source: string;
+  /** Branch, tag, or commit for a git source. */
+  ref?: string | null;
+  /** Subdirectory of a monorepo holding the plugin. */
+  repo_path?: string | null;
+  /** Written as `config.json` in the workspace where the plugin's commands run. */
+  config?: Record<string, unknown> | null;
+}
+
+/**
+ * An automation bundle a conversation start delivers into its sandbox
+ * workspace. The archive is untrusted: the server validates it before
+ * extraction and never logs it.
+ */
+export interface AutomationBundle {
+  /** Shell command run inside the extracted root. */
+  entrypoint: string;
+  /** Optional script, relative to the extracted root, run once before it. */
+  setup_script_path?: string | null;
+  /** Written as `config.json` at the extracted root, beside the entrypoint. */
+  config: Record<string, unknown>;
+  /** Base64 of a gzipped tar holding the bundle. */
+  tarball_b64: string;
+}
+
 export interface CreateConversationRequest {
   agent: AgentBase;
   initial_message?: Message;
@@ -129,6 +157,10 @@ export interface CreateConversationRequest {
   workspace: Record<string, unknown>;
   hook_config?: HookConfig | null;
   user_id?: string | null;
+  /** Plugin sources to load, each with an optional install-time config. */
+  plugins?: PluginSource[] | null;
+  /** Automation bundle delivered into the workspace before the first turn. */
+  bundle?: AutomationBundle | null;
 }
 
 export interface CreateACPConversationRequest {
@@ -141,6 +173,10 @@ export interface CreateACPConversationRequest {
   workspace: Record<string, unknown>;
   hook_config?: HookConfig | null;
   user_id?: string | null;
+  /** Plugin sources to load, each with an optional install-time config. */
+  plugins?: PluginSource[] | null;
+  /** Automation bundle delivered into the workspace before the first turn. */
+  bundle?: AutomationBundle | null;
 }
 
 export interface UpdateConversationRequest {
