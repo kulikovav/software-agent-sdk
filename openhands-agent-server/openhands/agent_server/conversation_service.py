@@ -2119,6 +2119,7 @@ class ConversationService:
             # response and lands where the run log reads it.
             workspace_dir = stored.workspace.working_dir
             bundle = reuse_request.bundle if reuse_request is not None else None
+            bash_service = self.bash_event_service
             plugin_config = _plugin_workspace_config(
                 reuse_request.plugins if reuse_request is not None else None
             )
@@ -2126,8 +2127,9 @@ class ConversationService:
                 raise AgentLaunchError(
                     "A start delivers a bundle or a plugin config, not both"
                 )
+            entrypoint_id: UUID | None = None
             if bundle is not None:
-                if self.bash_event_service is None:
+                if bash_service is None:
                     raise AgentLaunchError(
                         "This server cannot run an automation bundle: it has no"
                         " bash event service"
@@ -2135,26 +2137,35 @@ class ConversationService:
                 await asyncio.to_thread(
                     prepare_automation_bundle, bundle, workspace_dir
                 )
-                await self.bash_event_service.start_bash_command(
+                entrypoint, _task = await bash_service.start_bash_command(
                     ExecuteBashRequest(
                         command=automation_bundle_command(bundle),
                         cwd=workspace_dir,
                         timeout=ENTRYPOINT_TIMEOUT_SECONDS,
                     )
                 )
+                entrypoint_id = entrypoint.id
             elif plugin_config is not None:
                 await asyncio.to_thread(
                     write_workspace_config, plugin_config, workspace_dir
                 )
             # New conversation: the agent is written to base_state.json (its
             # single source of truth), not to meta.json. Pass it explicitly.
-            event_service = await self._start_event_service(
-                stored,
-                is_new_conversation=True,
-                launched=launched,
-                max_budget_per_run=max_budget_per_run,
-                gateway_run=gateway_run,
-            )
+            try:
+                event_service = await self._start_event_service(
+                    stored,
+                    is_new_conversation=True,
+                    launched=launched,
+                    max_budget_per_run=max_budget_per_run,
+                    gateway_run=gateway_run,
+                )
+            except BaseException:
+                # No record exists for this conversation, so nothing else can
+                # stop the entrypoint this start already dispatched. It would
+                # otherwise run until its own timeout.
+                if entrypoint_id is not None and bash_service is not None:
+                    await bash_service.stop_bash_command(entrypoint_id)
+                raise
         try:
             if initial_message is not None:
                 await event_service.send_message(

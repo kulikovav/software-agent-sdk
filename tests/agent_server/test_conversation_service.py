@@ -707,12 +707,18 @@ class _RecordingBashEvents:
     def __init__(self) -> None:
         self.requests: list[ExecuteBashRequest] = []
         self.tasks: list[asyncio.Task] = []
+        self.command = MagicMock()
+        self.stopped: list[object] = []
 
     async def start_bash_command(self, request: ExecuteBashRequest):
         self.requests.append(request)
         task = asyncio.create_task(asyncio.sleep(0))
         self.tasks.append(task)
-        return MagicMock(), task
+        return self.command, task
+
+    async def stop_bash_command(self, command_id):
+        self.stopped.append(command_id)
+        return True
 
 
 @pytest.mark.asyncio
@@ -868,6 +874,36 @@ async def test_a_repeated_start_does_not_run_the_bundle_again(
 
     assert not created
     assert len(bash_events.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_record_start_stops_the_bundle_entrypoint(
+    conversation_service, tmp_path, monkeypatch
+):
+    """A start that fails after dispatching its entrypoint stops it again."""
+    workspace_dir = tmp_path / "workspace"
+    bash_events = _RecordingBashEvents()
+    conversation_service.bash_event_service = bash_events
+    request = StartConversationRequest(
+        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
+        workspace=LocalWorkspace(working_dir=str(workspace_dir)),
+        confirmation_policy=NeverConfirm(),
+        bundle=AutomationBundle(
+            entrypoint="python3 main.py",
+            config={},
+            tarball_b64=_bundle_tarball({"main.py": b"print('hello')\n"}),
+        ),
+    )
+
+    async def fail_start(*args, **kwargs):
+        raise RuntimeError("record store unavailable")
+
+    monkeypatch.setattr(conversation_service, "_start_event_service", fail_start)
+
+    with pytest.raises(RuntimeError, match="record store unavailable"):
+        await conversation_service.start_conversation(request)
+
+    assert bash_events.stopped == [bash_events.command.id]
 
 
 @pytest.mark.asyncio
