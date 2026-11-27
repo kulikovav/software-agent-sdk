@@ -50,9 +50,12 @@ class PluginSource(BaseModel):
     config: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Install-time configuration an automation's conversation start "
-            "delivers as `config.json` in the conversation workspace, where "
-            "the plugin's commands run. Unset leaves the plugin's defaults."
+            "Install-time configuration a plugin-backed automation stores. It "
+            "rides a conversation start for the stock runner, which renders "
+            "its values into the command. The agent server accepts it but a "
+            "governed start does not yet write it where the plugin's scripts "
+            "read it, so those scripts see their own defaults. Unset leaves "
+            "the plugin's defaults."
         ),
     )
 

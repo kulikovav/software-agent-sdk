@@ -122,7 +122,7 @@ from openhands.agent_server.workspaces_router import workspaces_router
 from openhands.sdk.errors import DomainError
 from openhands.sdk.logger import DEBUG, get_logger
 from openhands.sdk.tool.registry import seal_tool_catalog, unseal_tool_catalog
-from openhands.sdk.utils.redact import sanitize_dict
+from openhands.sdk.utils.redact import REDACT_VALUE_KEYS, sanitize_dict
 from openhands.tools.terminal.constants import (
     TMUX_SOCKET_NAME,
     TMUX_SOCKET_OWNER_OPTION,
@@ -765,6 +765,10 @@ def _sanitize_validation_errors(errors: Sequence[Any]) -> list[dict]:
     (e.g. ``agent.llm.api_key``, MCP server ``env``), those values would be
     echoed back to the caller.  This helper redacts them.
 
+    An ``input`` is replaced whole when the error's ``loc`` names an upload
+    field, because a field-level error's input is that value alone and key
+    matching cannot see it.
+
     Args:
         errors: The list of error dicts produced by ``exc.errors()``.
 
@@ -774,7 +778,10 @@ def _sanitize_validation_errors(errors: Sequence[Any]) -> list[dict]:
     sanitized: list[dict] = []
     for error in errors:
         error = dict(error)  # shallow copy so we don't mutate the original
-        if "input" in error:
+        loc = error.get("loc") or ()
+        if "input" in error and any(str(part) in REDACT_VALUE_KEYS for part in loc):
+            error["input"] = "<redacted>"
+        elif "input" in error:
             error["input"] = sanitize_dict(error["input"])
         if isinstance(error.get("ctx"), dict) and isinstance(
             error["ctx"].get("error"), Exception

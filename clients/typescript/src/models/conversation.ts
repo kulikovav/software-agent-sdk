@@ -127,14 +127,18 @@ export interface PluginSource {
   ref?: string | null;
   /** Subdirectory of a monorepo holding the plugin. */
   repo_path?: string | null;
-  /** Written as `config.json` in the workspace where the plugin's commands run. */
+  /**
+   * Install-time configuration a plugin-backed automation stores. The stock
+   * runner renders it into the command; a governed start accepts it but does
+   * not yet write it where the plugin's scripts read it.
+   */
   config?: Record<string, unknown> | null;
 }
 
 /**
  * An automation bundle a conversation start delivers into its sandbox
- * workspace. The archive is untrusted: the server validates it before
- * extraction and never logs it.
+ * workspace. The archive is untrusted: the server that runs the conversation
+ * in a sandbox validates it before extraction and never logs it.
  */
 export interface AutomationBundle {
   /** Shell command run inside the extracted root. */

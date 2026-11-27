@@ -41,6 +41,11 @@ SECRET_KEY_PATTERNS = frozenset(
 # These typically contain environment variables or headers that may include secrets.
 REDACT_ALL_VALUES_KEYS = frozenset({"environment", "env", "headers"})
 
+# Keys whose value is upload bytes rather than a credential. Not a secret name,
+# so the patterns above miss it, but a validation error's ``input`` can echo a
+# request body: redact it wherever it appears.
+REDACT_VALUE_KEYS = frozenset({"tarball_b64"})
+
 # Specific URL query parameter names (lowercased) that should always be redacted,
 # in addition to any parameter matching SECRET_KEY_PATTERNS via is_secret_key().
 SENSITIVE_URL_PARAMS = frozenset(
@@ -109,7 +114,7 @@ def sanitize_dict(content: Any) -> Any:
             key_lower = key_str.lower()
             if key_lower in REDACT_ALL_VALUES_KEYS:
                 sanitized[key] = _redact_all_values(value)
-            elif is_secret_key(key_str):
+            elif key_lower in REDACT_VALUE_KEYS or is_secret_key(key_str):
                 sanitized[key] = "<redacted>"
             else:
                 sanitized[key] = sanitize_dict(value)

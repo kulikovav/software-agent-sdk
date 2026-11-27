@@ -68,7 +68,6 @@ from openhands.sdk.launch import AgentLaunchError
 from openhands.sdk.llm import MessageToolCall, TextContent
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.mcp.config import dump_mcp_config
-from openhands.sdk.plugin import PluginSource
 from openhands.sdk.secret import SecretSource, StaticSecret
 from openhands.sdk.security.confirmation_policy import NeverConfirm
 from openhands.sdk.security.risk import SecurityRisk
@@ -822,30 +821,6 @@ async def test_a_start_with_an_unsafe_bundle_is_refused_before_the_record(
 
     assert await conversation_service.count_conversations() == 0
     assert not (tmp_path / "escaped.txt").exists()
-
-
-@pytest.mark.asyncio
-async def test_a_start_with_a_bundle_and_a_plugin_config_is_refused(
-    conversation_service, tmp_path
-):
-    """The two deliveries share config.json, so they cannot be combined."""
-    conversation_service.bash_event_service = _RecordingBashEvents()
-    request = StartConversationRequest(
-        agent=Agent(llm=LLM(model="gpt-4o", usage_id="test-llm"), tools=[]),
-        workspace=LocalWorkspace(working_dir=str(tmp_path / "workspace")),
-        confirmation_policy=NeverConfirm(),
-        plugins=[PluginSource(source="github:acme/plugin", config={"a": 1})],
-        bundle=AutomationBundle(
-            entrypoint="python3 main.py",
-            config={},
-            tarball_b64=_bundle_tarball({"main.py": b"print('hello')\n"}),
-        ),
-    )
-
-    with pytest.raises(AgentLaunchError, match="not both"):
-        await conversation_service.start_conversation(request)
-
-    assert await conversation_service.count_conversations() == 0
 
 
 @pytest.mark.asyncio

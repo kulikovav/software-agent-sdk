@@ -18,6 +18,7 @@ from pydantic import (
     Field,
     Tag,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -453,11 +454,12 @@ AUTOMATION_BUNDLE_MAX_ARCHIVE_BYTES: int = 64 * 1024 * 1024
 class AutomationBundle(BaseModel):
     """An automation bundle a governed start carries into its sandbox.
 
-    The archive is untrusted input from an automation author. A server that
-    accepts this field validates and extracts it into the conversation's
-    workspace, writes ``config`` as ``config.json`` at the extracted root,
-    runs ``setup_script_path`` once if given, then starts ``entrypoint``
-    there. The start is a one-shot instruction: it is not conversation state.
+    The archive is untrusted input from an automation author. The server that
+    runs the conversation in a sandbox validates and extracts it into the
+    conversation's workspace, writes ``config`` as ``config.json`` at the
+    extracted root, runs ``setup_script_path`` once if given, then starts
+    ``entrypoint`` there. The start is a one-shot instruction: it is not
+    conversation state.
     """
 
     entrypoint: str = Field(
@@ -489,6 +491,15 @@ class AutomationBundle(BaseModel):
             "validated and size-capped before extraction; it is never logged."
         ),
     )
+
+    @field_validator("setup_script_path")
+    @classmethod
+    def _reject_blank_setup_script(cls, value: str | None) -> str | None:
+        # ``bash '' && entrypoint`` would run nothing but the entrypoint: an
+        # empty path is invalid input, not a request to skip the setup script.
+        if value is not None and not value.strip():
+            raise ValueError("setup_script_path must not be blank")
+        return value
 
 
 class StartConversationRequest(ConversationConfig):

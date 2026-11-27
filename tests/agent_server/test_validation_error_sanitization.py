@@ -6,10 +6,12 @@ Verifies that 422 error responses do not leak sensitive fields such as
 Refs: OpenHands/evaluation#385
 """
 
+import json
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from openhands.agent_server.api import (
     _add_exception_handlers,
@@ -179,6 +181,33 @@ class TestSanitizeValidationErrors:
         result = _sanitize_validation_errors(errors)
         assert result[0]["ctx"]["error"] == "bad metadata"
 
+    def test_redacts_the_archive_under_any_parent_key(self):
+        """The tarball bytes are redacted wherever they sit in the input."""
+        marker = "TARBALLMARKERNOTBASE64"
+        errors = [
+            {
+                "type": "value_error",
+                "loc": [],
+                "msg": "Value error, a start names one agent source",
+                "input": {
+                    "agent": {"llm": {"model": "gpt-4"}},
+                    "bundle": {"entrypoint": "python3 main.py", "tarball_b64": marker},
+                },
+            },
+            {
+                "type": "string_type",
+                "loc": ["body", "bundle", "tarball_b64"],
+                "msg": "Input should be a valid string",
+                "input": marker,
+            },
+        ]
+        result = _sanitize_validation_errors(errors)
+
+        assert marker not in json.dumps(result)
+        assert result[0]["input"]["bundle"]["tarball_b64"] == "<redacted>"
+        assert result[0]["input"]["bundle"]["entrypoint"] == "python3 main.py"
+        assert result[1]["input"] == "<redacted>"
+
     def test_empty_errors_list(self):
         """An empty error list should return an empty list."""
         assert _sanitize_validation_errors([]) == []
@@ -206,6 +235,24 @@ class TestValidationErrorResponse:
 
         @app.post("/test-endpoint")
         async def test_endpoint(payload: SecretPayload):
+            return {"ok": True}
+
+        class ArchivePayload(BaseModel):
+            """The shape that echoes a whole body: a before-validator raises."""
+
+            agent: dict | None = None
+            agent_profile_id: str | None = None
+            bundle: dict | None = None
+
+            @model_validator(mode="before")
+            @classmethod
+            def _fail_like_the_start_request(cls, data):
+                if isinstance(data, dict) and data.get("agent"):
+                    raise ValueError("`agent_profile_id` is mutually exclusive")
+                return data
+
+        @app.post("/archive-endpoint")
+        async def archive_endpoint(payload: ArchivePayload):
             return {"ok": True}
 
         return app
@@ -279,3 +326,23 @@ class TestValidationErrorResponse:
         assert response.status_code == 422
         body = response.json()
         assert "detail" in body
+
+    def test_422_response_never_echoes_the_archive(self, app_with_validation):
+        """A body-echoing validation error must not return the tarball bytes."""
+        marker = "TARBALLMARKERNOTBASE64"
+        client = TestClient(app_with_validation)
+
+        response = client.post(
+            "/archive-endpoint",
+            json={
+                "agent": {"llm": {"model": "gpt-4"}},
+                "agent_profile_id": "0a1b2c3d-0000-4000-8000-000000000042",
+                "bundle": {"entrypoint": "python3 main.py", "tarball_b64": marker},
+            },
+        )
+
+        assert response.status_code == 422
+        assert marker not in response.text
+        assert response.json()["detail"][0]["input"]["bundle"]["tarball_b64"] == (
+            "<redacted>"
+        )

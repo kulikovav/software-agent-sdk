@@ -2,8 +2,9 @@
 
 A governed automation run arrives as one conversation start carrying a
 gzipped tar, an entrypoint command, an optional setup script and a config.
-The archive comes from an automation author, so it is validated before
-anything is written, and neither the archive nor its contents are ever
+The archive comes from an automation author, so it is checked before any
+member is extracted; an escaping link is refused during extraction, after
+earlier members are written. Neither the archive nor its contents are ever
 logged. Nothing here runs the bundle: the entrypoint is dispatched through
 the server's bash events, which is the surface run logs already read.
 """
@@ -47,29 +48,33 @@ class AutomationBundleError(AgentLaunchError):
 def _decode_archive(bundle: AutomationBundle) -> bytes:
     try:
         archive = base64.b64decode(bundle.tarball_b64, validate=True)
-    except ValueError as exc:
+    except ValueError:
+        # `from None` drops the decoder's context; only this message is ours.
         raise AutomationBundleError(
             "The automation bundle archive is not valid base64"
-        ) from exc
+        ) from None
     if len(archive) > AUTOMATION_BUNDLE_MAX_ARCHIVE_BYTES:
         raise AutomationBundleError("The automation bundle archive is too large")
     return archive
 
 
 def _validated_members(tar: tarfile.TarFile) -> None:
-    """Refuse an archive a data filter would reject, before it writes anything.
+    """Refuse the entries this reader can check, before extraction starts.
 
     Absolute names and ``..`` traversal, and device or FIFO entries, are
-    refused here; escaping links are refused by tarfile's ``data`` filter,
-    which also bounds what may be written. The size bound is applied to the
-    declared member sizes so an archive cannot fill the workspace.
+    refused here; escaping links are refused by tarfile's ``data`` filter
+    during extraction, after earlier members are written. The size bound is
+    applied to the declared member sizes so an archive cannot fill the
+    workspace.
     """
     try:
         members = tar.getmembers()
-    except (tarfile.TarError, OSError) as exc:
+    except (tarfile.TarError, OSError):
+        members = None  # a tar error can name a member; see the raise below
+    if members is None:
         raise AutomationBundleError(
             "The automation bundle is not a readable tar archive"
-        ) from exc
+        )
     if len(members) > MAX_EXTRACTED_MEMBERS:
         raise AutomationBundleError("The automation bundle has too many entries")
     declared_bytes = 0
@@ -92,6 +97,10 @@ def _validated_members(tar: tarfile.TarFile) -> None:
 def _validated_setup_script(setup_script_path: str | None) -> str | None:
     if setup_script_path is None:
         return None
+    if not setup_script_path.strip():
+        raise AutomationBundleError(
+            "The automation bundle's setup script path must not be blank"
+        )
     path = PurePosixPath(setup_script_path)
     if path.is_absolute() or ".." in path.parts:
         raise AutomationBundleError(
@@ -111,6 +120,7 @@ def prepare_automation_bundle(bundle: AutomationBundle, workspace: str | Path) -
     _validated_setup_script(bundle.setup_script_path)
     archive = _decode_archive(bundle)
     root = Path(workspace)
+    failed = False
     try:
         root.mkdir(parents=True, exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
@@ -118,10 +128,12 @@ def prepare_automation_bundle(bundle: AutomationBundle, workspace: str | Path) -
             tar.extractall(path=root, filter="data")
     except AutomationBundleError:
         raise
-    except (tarfile.TarError, OSError, ValueError) as exc:
-        raise AutomationBundleError(
-            "The automation bundle could not be extracted"
-        ) from exc
+    except (tarfile.TarError, OSError, ValueError):
+        # Raised outside the handler: tarfile's filter errors name the member,
+        # and an exception chain would keep that name in ``__context__``.
+        failed = True
+    if failed:
+        raise AutomationBundleError("The automation bundle could not be extracted")
     write_workspace_config(bundle.config, root)
 
 
@@ -136,8 +148,8 @@ def automation_bundle_command(bundle: AutomationBundle) -> str:
 def write_workspace_config(config: Mapping[str, Any], workspace: str | Path) -> None:
     """Write ``config`` as ``config.json`` in the conversation workspace.
 
-    A bundle's entrypoint and a plugin's runner both read this file from the
-    workspace root, which is why the two share it.
+    A bundle's entrypoint runs from the workspace root and reads this file
+    there.
     """
     path = Path(workspace) / CONFIG_FILENAME
     try:

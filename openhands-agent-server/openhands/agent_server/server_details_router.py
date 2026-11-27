@@ -100,8 +100,8 @@ class ServerInfo(BaseModel):
             "conversation_model_router_routes_v1",
             "conversation_configuration_additions_v1",
             "conversation_mcp_install_v1",
-            # The start's `plugins` field loads plugin sources, and a plugin
-            # entry's `config` reaches the plugin as config.json.
+            # The start's `plugins` field loads plugin sources. A plugin
+            # entry's `config` is accepted; no governed loader reads it yet.
             "conversation_plugins_v1",
         ]
     )

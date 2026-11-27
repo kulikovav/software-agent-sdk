@@ -10,8 +10,10 @@ import base64
 import io
 import json
 import tarfile
+import traceback
 
 import pytest
+from pydantic import ValidationError
 
 from openhands.agent_server import automation_bundle
 from openhands.agent_server.automation_bundle import (
@@ -156,3 +158,51 @@ def test_a_malformed_archive_is_refused(tmp_path):
 
     with pytest.raises(AutomationBundleError, match="base64"):
         prepare_automation_bundle(bundle, tmp_path / "workspace")
+
+
+def test_an_escaping_link_names_no_member_in_the_error_chain(tmp_path):
+    """The archive's contents must not surface through ``__cause__`` either."""
+    marker = "ARCHIVEMEMBERMARKER"
+    link = tarfile.TarInfo(marker)
+    link.type = tarfile.SYMTYPE
+    link.linkname = f"../{marker}.txt"
+    bundle = _bundle([(link, b"")])
+
+    with pytest.raises(AutomationBundleError) as caught:
+        prepare_automation_bundle(bundle, tmp_path / "workspace")
+
+    surfaces = [str(caught.value), repr(caught.value)]
+    surfaces.extend(
+        "".join(traceback.format_exception(linked))
+        for linked in _exception_chain(caught.value)
+    )
+    assert len(_exception_chain(caught.value)) == 1
+    assert all(marker not in surface for surface in surfaces)
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    """Every exception reachable from ``error`` by cause or context."""
+    chain: list[BaseException] = []
+    pending = [error]
+    while pending:
+        current = pending.pop()
+        if current in chain:
+            continue
+        chain.append(current)
+        pending.extend(
+            link
+            for link in (current.__cause__, current.__context__)
+            if link is not None
+        )
+    return chain
+
+
+def test_a_blank_setup_script_path_is_invalid_input():
+    """``bash '' && entrypoint`` would skip the entrypoint; refuse it."""
+    with pytest.raises(ValidationError, match="setup_script_path"):
+        _bundle(setup_script_path="   ")
+
+    with pytest.raises(AutomationBundleError, match="must not be blank"):
+        automation_bundle_command(
+            _bundle().model_copy(update={"setup_script_path": "   "})
+        )

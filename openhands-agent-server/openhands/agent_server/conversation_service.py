@@ -22,7 +22,6 @@ from openhands.agent_server.automation_bundle import (
     ENTRYPOINT_TIMEOUT_SECONDS,
     automation_bundle_command,
     prepare_automation_bundle,
-    write_workspace_config,
 )
 from openhands.agent_server.config import ACPSkillSourcing, Config, WebhookSpec
 from openhands.agent_server.conversation_lease import (
@@ -134,7 +133,6 @@ from openhands.sdk.llm.call_context import LLMCallContext
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from openhands.sdk.mcp.utils import MCPToolProvider
 from openhands.sdk.observability import OPERATION_METADATA_KEY, observe
-from openhands.sdk.plugin import PluginSource
 from openhands.sdk.secret import SecretSource
 from openhands.sdk.tool.client_tool import register_client_tools
 from openhands.sdk.tool.registry import get_tool_module_qualnames, is_tool_available
@@ -403,23 +401,6 @@ def _clone_conversation_repositories(
             "Could not clone the conversation's repositories: "
             + ", ".join(result.failed_repos)
         )
-
-
-def _plugin_workspace_config(
-    plugins: list[PluginSource] | None,
-) -> dict[str, Any] | None:
-    """The one plugin config a start delivers as ``config.json``.
-
-    A plugin's commands run from the conversation workspace, so its
-    install-time config is written there. ``config.json`` holds one object, so
-    a start naming more than one config is refused instead of dropping one.
-    """
-    configs = [plugin.config for plugin in plugins or () if plugin.config]
-    if len(configs) > 1:
-        raise AgentLaunchError(
-            "A start may deliver at most one plugin config: config.json holds one"
-        )
-    return configs[0] if configs else None
 
 
 def _compose_conversation_info(
@@ -2113,20 +2094,15 @@ class ConversationService:
                     stored.workspace.working_dir,
                     stored.secrets,
                 )
-            # A start's bundle or plugin config is delivered once, into the
-            # same workspace, before the record exists. The entrypoint is
-            # dispatched as one bash event, so its output outlives the start
-            # response and lands where the run log reads it.
+            # A start's bundle is delivered once, into the same workspace,
+            # before the record exists. The entrypoint is dispatched as one
+            # bash event, so its output outlives the start response and lands
+            # where the run log reads it. A plugin's ``config`` rides the start
+            # for the stock runner; no governed plugin reads it yet, so there
+            # is nothing to write here.
             workspace_dir = stored.workspace.working_dir
             bundle = reuse_request.bundle if reuse_request is not None else None
             bash_service = self.bash_event_service
-            plugin_config = _plugin_workspace_config(
-                reuse_request.plugins if reuse_request is not None else None
-            )
-            if bundle is not None and plugin_config is not None:
-                raise AgentLaunchError(
-                    "A start delivers a bundle or a plugin config, not both"
-                )
             entrypoint_id: UUID | None = None
             if bundle is not None:
                 if bash_service is None:
@@ -2145,10 +2121,6 @@ class ConversationService:
                     )
                 )
                 entrypoint_id = entrypoint.id
-            elif plugin_config is not None:
-                await asyncio.to_thread(
-                    write_workspace_config, plugin_config, workspace_dir
-                )
             # New conversation: the agent is written to base_state.json (its
             # single source of truth), not to meta.json. Pass it explicitly.
             try:
